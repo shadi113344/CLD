@@ -5,7 +5,7 @@
 //    end; later runs stop once they reach bookmarks Stash already has.
 (() => {
   const P = () => window.__stashProgress;
-  const log = (...a) => console.debug('[Stash]', ...a);
+  const log = (...a) => console.info('[Stash]', ...a);
   const onBookmarksPage = () => /^\/i\/bookmarks/.test(location.pathname);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,8 +47,13 @@
       title: run.mode === 'all' ? 'Syncing all X bookmarks' : 'Syncing new X bookmarks',
       detail: `${run.added} new saved · ${run.seen.size} checked · ${extra}`,
       value: null,
-      actions: [{ label: 'Stop', onClick: () => finish('Stopped') }],
+      actions: [{ label: 'Stop', onClick: stop }],
     });
+  }
+
+  function stop() {
+    window.postMessage({ __stash: 'x-paginate-stop' }, location.origin);
+    finish('Stopped');
   }
 
   function scrollDown() {
@@ -61,13 +66,50 @@
     se.scrollTop = se.scrollHeight;
   }
 
-  async function start(mode) {
-    if (run.active) return;
-    Object.assign(run, { active: true, mode, seen: new Set(passiveSeen), added: passiveAdded, knownStreak: 0, lastBatch: Date.now() });
-    passiveSeen.clear();
-    passiveAdded = 0;
-    log('sync started', mode);
-    progress('starting…');
+  // ---- strategy 1: ask X for each page directly (x-main.js replays X's own request) ----
+
+  let templateReady = false;
+  let apiListener = null;
+  window.addEventListener('message', (e) => {
+    if (e.source !== window) return;
+    if (e.data?.__stash === 'x-template') templateReady = true;
+    if (e.data?.__stash === 'x-paginate-status') apiListener?.(e.data);
+  });
+
+  async function waitForTemplate(ms) {
+    window.postMessage({ __stash: 'x-template-query' }, location.origin);
+    for (let t = 0; t < ms && !templateReady; t += 250) await sleep(250);
+    return templateReady;
+  }
+
+  function viaApi() {
+    return new Promise((resolve) => {
+      let pages = 0;
+      apiListener = (m) => {
+        if (!run.active) return resolve('Stopped');
+        if (m.state === 'page') {
+          pages = m.page;
+          progress(`page ${m.page} loaded`);
+          if (run.mode === 'new' && run.knownStreak >= 1 && run.seen.size > 0) {
+            window.postMessage({ __stash: 'x-paginate-stop' }, location.origin);
+            resolve('Up to date');
+          }
+        }
+        if (m.state === 'waiting') progress(`X is rate-limiting, waiting ${m.seconds}s…`);
+        if (m.state === 'done') resolve('Reached the end');
+        if (m.state === 'stopped') resolve('Stopped');
+        if (m.state === 'error') {
+          log('direct paging failed:', m.error, 'after', pages, 'pages');
+          resolve(null);
+        }
+      };
+      window.postMessage({ __stash: 'x-paginate' }, location.origin);
+    }).finally(() => (apiListener = null));
+  }
+
+  // ---- strategy 2 (fallback): scroll the page so X's app loads more itself ----
+
+  async function viaScrolling() {
     let stalls = 0;
     let lastHeight = 0;
     let lastCount = 0;
@@ -96,10 +138,31 @@
       lastHeight = h;
       lastCount = run.seen.size;
       if (stalls >= 3) progress(`waiting for X to load more (${stalls}/8)…`);
-      if (run.mode === 'new' && run.knownStreak >= 3) return finish('Up to date');
-      if (stalls >= 8) return finish('Reached the end');
+      if (run.mode === 'new' && run.knownStreak >= 3) return 'Up to date';
+      if (stalls >= 8) return 'Reached the end';
     }
-    if (run.active) finish('Stopped');
+    return 'Stopped';
+  }
+
+  async function start(mode) {
+    if (run.active) return;
+    Object.assign(run, { active: true, mode, seen: new Set(passiveSeen), added: passiveAdded, knownStreak: 0, lastBatch: Date.now() });
+    passiveSeen.clear();
+    passiveAdded = 0;
+    log('sync started', mode);
+    progress('starting…');
+    let result = null;
+    if (await waitForTemplate(12000)) {
+      run.knownStreak = 0;
+      result = await viaApi();
+    } else {
+      log('never saw X request its bookmarks; falling back to scrolling');
+    }
+    if (!result && run.active) {
+      progress('switching to scrolling…');
+      result = await viaScrolling();
+    }
+    finish(result || 'Stopped');
   }
 
   async function finish(why) {
@@ -142,7 +205,7 @@
   setInterval(() => {
     const on = onBookmarksPage();
     if (on && !wasOn) setTimeout(() => onBookmarksPage() && !run.active && onEnter(), 2000);
-    if (!on && wasOn && run.active) finish('Stopped');
+    if (!on && wasOn && run.active) stop();
     wasOn = on;
   }, 1000);
 })();
