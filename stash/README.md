@@ -11,7 +11,8 @@ A private, local-first bookmark manager for Chrome. Built from scratch as a pers
 | **Find** | Instant keyword search plus on-device meaning-based search and a "Related" list |
 | **Ask** | "Ask your bookmarks" chat. With on-device AI only, it returns your most relevant saves. With an API key, it writes an answer with citations. |
 | **Resurface** | Spaced review: each save comes back after 3 → 7 → 21 → 60 → 180 days. Shows a badge count and an optional daily notification. |
-| **Export** | JSON backup and restore, plus a Markdown zip (one `.md` per bookmark with YAML frontmatter) ready for an Obsidian vault |
+| **Export any view** | Every list (X, Reddit, LinkedIn, Web, a collection, a tag, or search results) has an **Export** menu: Markdown, CSV, JSON, web page, browser-bookmarks file (imports into Chrome, Firefox, Safari, Raindrop…), PDF via the print dialog, or a plain list of URLs |
+| **Backup** | JSON backup and restore, plus a Markdown zip (one `.md` per bookmark with YAML frontmatter) ready for an Obsidian vault |
 | **Look** | Your own name, accent color and theme (system, light or dark). Works as a full-page library and in Chrome's side panel. |
 
 ## Privacy model

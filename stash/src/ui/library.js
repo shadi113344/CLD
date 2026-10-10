@@ -1,7 +1,7 @@
 import * as db from '../lib/db.js';
 import { getSettings, saveSettings, apiConfigured, DEFAULTS } from '../lib/settings.js';
 import { rank, cosine } from '../lib/search.js';
-import { exportJson, importJson, exportMarkdownZip } from '../lib/export.js';
+import { exportJson, importJson, exportMarkdownZip, exportList, LIST_FORMATS } from '../lib/export.js';
 
 const PANEL = location.pathname.endsWith('panel.html');
 const PAGE = 150;
@@ -265,6 +265,7 @@ function renderList() {
       <strong style="color:var(--text)">${esc(listTitle())}</strong>
       <span>${state.query ? `${list.length} match${list.length === 1 ? '' : 'es'}` : `${list.length} item${list.length === 1 ? '' : 's'}`}</span>
       <span class="grow"></span>${syncBtn}
+      <select id="exportFmt" aria-label="Export this list" title="Export the links in this view"><option value="">Export ${list.length}…</option>${Object.entries(LIST_FORMATS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
       ${state.query ? '' : `<select id="sort" aria-label="Sort"><option value="saved">Newest saved</option><option value="oldest">Oldest saved</option><option value="posted">Newest posted</option></select>`}
     </div>`;
 
@@ -280,7 +281,42 @@ function renderList() {
   bindToolbar();
 }
 
+function slugName(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stash';
+}
+
+// Export whatever the current view shows (platform, collection, tag, or search results).
+function exportCurrent(format) {
+  const list = currentList();
+  const title = state.query ? `${listTitle()} — “${state.query}”` : `${listTitle()} — ${state.settings.displayName || 'Stash'}`;
+  const out = exportList(list, format, title, state.collections);
+  if (out.html) return printHtml(out.html);
+  download(out.blob, `${slugName(listTitle())}-${new Date().toISOString().slice(0, 10)}.${out.ext}`);
+  toast(`Exported ${list.length} link${list.length === 1 ? '' : 's'}`);
+}
+
+// PDF: render into a hidden frame and open the print dialog (choose “Save as PDF”).
+function printHtml(html) {
+  const f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;width:0;height:0;border:0;visibility:hidden';
+  f.srcdoc = html;
+  f.onload = () => {
+    f.contentWindow.focus();
+    f.contentWindow.print();
+    setTimeout(() => f.remove(), 60000);
+  };
+  document.body.appendChild(f);
+}
+
 function bindToolbar() {
+  const ex = $('#exportFmt');
+  if (ex) {
+    ex.onchange = () => {
+      const fmt = ex.value;
+      ex.value = '';
+      if (fmt) exportCurrent(fmt);
+    };
+  }
   const s = $('#sort');
   if (s) {
     s.value = state.sort;
@@ -822,6 +858,7 @@ function commands() {
     { label: 'Export JSON backup', run: async () => download(await exportJson(), 'stash-backup.json') },
     { label: 'Export Markdown (Obsidian)', run: async () => download(await exportMarkdownZip(), 'stash-markdown.zip') },
     { label: 'Import JSON backup', run: importFile },
+    ...Object.entries(LIST_FORMATS).map(([k, v]) => ({ label: `Export this view as ${v}`, run: () => exportCurrent(k) })),
     { label: 'Sync Reddit now', run: redditSync },
     { label: 'Open X bookmarks (sync)', run: () => chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' }) },
     { label: 'Open LinkedIn saved posts (sync)', run: () => chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' }) },

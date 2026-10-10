@@ -6,7 +6,10 @@
 (() => {
   const P = () => window.__stashProgress;
   const log = (...a) => console.info('[Stash]', ...a);
-  const onBookmarksPage = () => /^\/i\/bookmarks/.test(location.pathname);
+  // Path check is only a backup trigger; the main one is X fetching the bookmarks timeline.
+  const onBookmarksPage = () => /bookmarks/i.test(location.pathname);
+  let syncPath = null; // the page a sync started on; leaving it stops the sync
+  const stillThere = () => location.pathname === syncPath;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const run = { active: false, mode: 'new', seen: new Set(), added: 0, knownStreak: 0, lastBatch: 0 };
@@ -72,7 +75,11 @@
   let apiListener = null;
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
-    if (e.data?.__stash === 'x-template') templateReady = true;
+    if (e.data?.__stash === 'x-template') {
+      if (!templateReady) log('bookmarks timeline detected on', location.pathname);
+      templateReady = true;
+      trigger('timeline request seen');
+    }
     if (e.data?.__stash === 'x-paginate-status') apiListener?.(e.data);
   });
 
@@ -113,7 +120,7 @@
     let stalls = 0;
     let lastHeight = 0;
     let lastCount = 0;
-    while (run.active && onBookmarksPage()) {
+    while (run.active && stillThere()) {
       // Hidden tabs don't render, so X never loads more. Wait until visible.
       if (document.hidden) {
         progress('paused — switch to this tab to continue');
@@ -149,7 +156,8 @@
     Object.assign(run, { active: true, mode, seen: new Set(passiveSeen), added: passiveAdded, knownStreak: 0, lastBatch: Date.now() });
     passiveSeen.clear();
     passiveAdded = 0;
-    log('sync started', mode);
+    syncPath = location.pathname;
+    log('sync started', mode, 'on', syncPath);
     progress('starting…');
     let result = null;
     if (await waitForTemplate(12000)) {
@@ -183,7 +191,7 @@
 
   async function onEnter() {
     const { settings = {}, xFullSyncDone } = await chrome.storage.local.get(['settings', 'xFullSyncDone']);
-    if (settings.captureX === false) return;
+    if (settings.captureX === false) return log('X capture is off in settings');
     const mode = xFullSyncDone ? 'new' : 'all';
     if (settings.xAutoSync === false) {
       ui({
@@ -200,12 +208,25 @@
     start(mode);
   }
 
-  // X is a single-page app, so watch for navigation to and from the bookmarks page.
-  let wasOn = false;
+  // Start once per page view, as soon as we know this is a bookmarks timeline.
+  let triggeredFor = null;
+  function trigger(why) {
+    if (run.active || triggeredFor === location.pathname) return;
+    triggeredFor = location.pathname;
+    log('auto-sync triggered:', why);
+    onEnter().catch((e) => log('could not start sync:', e?.message || e));
+  }
+
+  log('loaded on', location.pathname);
+  let lastPath = location.pathname;
   setInterval(() => {
-    const on = onBookmarksPage();
-    if (on && !wasOn) setTimeout(() => onBookmarksPage() && !run.active && onEnter(), 2000);
-    if (!on && wasOn && run.active) stop();
-    wasOn = on;
+    if (location.pathname !== lastPath) {
+      lastPath = location.pathname;
+      triggeredFor = null;
+      templateReady = false;
+      if (run.active && !stillThere()) stop();
+    }
+    // Backup trigger in case X's request was missed: URL looks like bookmarks.
+    if (onBookmarksPage() && !run.active && triggeredFor !== location.pathname) setTimeout(() => onBookmarksPage() && trigger('bookmarks URL'), 4000);
   }, 1000);
 })();
