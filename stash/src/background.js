@@ -140,9 +140,14 @@ async function enrichLoop() {
   const s = await getSettings();
   if (!s.localAi && !(s.autoTag && s.taggingEngine === 'api' && apiConfigured(s))) return;
   const vocab = await tagVocabulary();
+  const label = s.localAi ? 'Indexing with on-device AI' : 'Tagging';
+  let done = 0;
+  let total = (await db.pendingEnrichment(100000)).length;
   for (;;) {
     const batch = await db.pendingEnrichment(16);
     if (!batch.length) return;
+    total = Math.max(total, done + batch.length);
+    broadcast({ type: 'progress', done, total, label });
     let vecs = [];
     if (s.localAi) {
       try {
@@ -166,7 +171,9 @@ async function enrichLoop() {
         }
       }
       await db.patchBookmark(b.id, patch);
+      done++;
     }
+    broadcast({ type: 'progress', done, total, label });
     broadcast({ type: 'changed' });
   }
 }

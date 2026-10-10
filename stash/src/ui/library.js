@@ -125,7 +125,19 @@ function reloadSoon() {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'changed') reloadSoon();
+  if (msg?.type === 'progress') showIndexing(msg);
 });
+
+// Thin bar under the header while the background indexes new bookmarks.
+let indexHide;
+function showIndexing({ done, total, label }) {
+  const el = $('#indexing');
+  el.hidden = false;
+  el.querySelector('span').textContent = done >= total ? `${label} — done` : `${label} ${done} / ${total}`;
+  el.querySelector('i').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+  clearTimeout(indexHide);
+  indexHide = setTimeout(() => (el.hidden = true), done >= total ? 2000 : 30000);
+}
 chrome.storage.onChanged.addListener((c) => {
   if (c.settings) reloadSoon();
 });
@@ -240,7 +252,7 @@ function renderList() {
 
   const syncBtn =
     v === 's' && arg === 'x'
-      ? `<button class="ghost" data-act="open-url" data-url="https://x.com/i/bookmarks">Open X bookmarks to sync</button>`
+      ? `<button class="ghost" data-act="open-url" data-url="https://x.com/i/bookmarks#stash-sync">Open X bookmarks to sync</button>`
       : v === 's' && arg === 'reddit'
         ? `<button class="ghost" data-act="reddit-sync">Sync Reddit now</button>`
         : v === 's' && arg === 'linkedin'
@@ -285,7 +297,7 @@ function emptyState() {
   return `<div class="empty">
     <h2>Your stash is empty</h2>
     <p>Press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> on any page (or click the toolbar icon) to save it.</p>
-    <p>Visit your <a href="https://x.com/i/bookmarks" target="_blank">X bookmarks</a>, <a href="https://www.reddit.com/" target="_blank">Reddit</a>, or
+    <p>Visit your <a href="https://x.com/i/bookmarks#stash-sync" target="_blank">X bookmarks</a>, <a href="https://www.reddit.com/" target="_blank">Reddit</a>, or
     <a href="https://www.linkedin.com/my-items/saved-posts/" target="_blank">LinkedIn saved posts</a> and scroll — they’re captured automatically.</p>
     <p>Have a backup? <a href="#" data-act="import">Import JSON</a>.</p></div>`;
 }
@@ -723,7 +735,7 @@ function renderSettings() {
     const a = e.target.closest('[data-s]')?.dataset.s;
     if (!a) return;
     if (a === 'reddit') return redditSync();
-    if (a === 'x') return chrome.tabs.create({ url: 'https://x.com/i/bookmarks' });
+    if (a === 'x') return chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' });
     if (a === 'li') return chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' });
     if (a === 'reindex') {
       await send('reenrichAll');
@@ -810,7 +822,7 @@ function commands() {
     { label: 'Export Markdown (Obsidian)', run: async () => download(await exportMarkdownZip(), 'stash-markdown.zip') },
     { label: 'Import JSON backup', run: importFile },
     { label: 'Sync Reddit now', run: redditSync },
-    { label: 'Open X bookmarks (sync)', run: () => chrome.tabs.create({ url: 'https://x.com/i/bookmarks' }) },
+    { label: 'Open X bookmarks (sync)', run: () => chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' }) },
     { label: 'Open LinkedIn saved posts (sync)', run: () => chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' }) },
   ];
   if (PANEL) list.unshift({ label: 'Save current tab', run: saveTab });

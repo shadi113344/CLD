@@ -29,7 +29,10 @@
     return res.json();
   }
 
-  async function sync(full) {
+  async function sync(full, show = true) {
+    const P = window.__stashProgress;
+    const ui = (o) => show && P?.update({ title: 'Syncing Reddit saved', ...o });
+    ui({ detail: 'Connecting…', value: null, actions: [] });
     const me = await getJson('/api/me.json');
     const name = me?.data?.name;
     if (!name) throw new Error('Log in to Reddit first.');
@@ -45,15 +48,21 @@
       added += n;
       total += items.length;
       after = j.data.after;
+      ui({ detail: `${added} new saved · ${total} checked · page ${page + 1}`, value: null });
       // Incremental: once a whole page is already known, older pages are too.
       if (!after || (!full && n === 0)) break;
     }
+    ui({ title: 'Reddit sync complete', detail: `${added} new saved · ${total} checked`, value: 1, actions: [{ label: 'Done', primary: true, onClick: () => P.hide() }] });
+    if (show) setTimeout(() => P?.hide(), 6000);
     return { added, total };
   }
 
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     if (msg?.type !== 'reddit-sync') return;
-    sync(msg.full).then(sendResponse, (e) => sendResponse({ error: String(e.message || e) }));
+    sync(msg.full).then(sendResponse, (e) => {
+      window.__stashProgress?.update({ title: 'Reddit sync failed', detail: String(e.message || e), value: 0, actions: [] });
+      sendResponse({ error: String(e.message || e) });
+    });
     return true;
   });
 
@@ -65,7 +74,7 @@
     if (Date.now() - redditLastSync < 6 * 3600 * 1000) return;
     await chrome.storage.local.set({ redditLastSync: Date.now() });
     try {
-      const r = await sync(false);
+      const r = await sync(false, false);
       if (r.added) window.__stashToast?.(`Stash: ${r.added} new Reddit save${r.added > 1 ? 's' : ''}`);
     } catch {}
   })();
