@@ -31,7 +31,7 @@ Compared with the original extension: it doesn't send bookmarks to a vendor serv
 
 ## How each source syncs
 
-- **X:** use **Open X bookmarks to sync** in Stash, or open <https://x.com/i/bookmarks> yourself and pick **Sync new** or **Sync everything** on the card that appears. Stash scrolls the page for you so older bookmarks load, and a progress card shows the count. **Sync new** stops once it reaches bookmarks it already has; **Sync everything** goes to the very end. Keep the tab open while it runs. Stash only reads the data X's own page loads; it makes no extra requests and changes nothing.
+- **X:** open <https://x.com/i/bookmarks> (or click **Open X bookmarks to sync** in Stash) and leave the tab in front. Stash scrolls the page automatically, and a progress card in the bottom-right shows how many bookmarks it has saved. The first sync goes all the way to your oldest bookmark; after that it stops once it reaches bookmarks it already has. **Full rescan** on the card walks everything again. Auto-scrolling can be turned off in Settings. Stash only reads the data X's own page loads; it makes no extra requests and changes nothing.
 - **Reddit:** syncs quietly when you visit reddit.com (at most every 6 hours), or use **Sync Reddit now**, which shows a progress card. It uses your logged-in session through Reddit's JSON endpoints.
 - **LinkedIn:** open **My items → Saved posts** and scroll. LinkedIn has no API for this, so posts are read from the page. If LinkedIn changes its markup, this is the part most likely to need a fix (`src/content/linkedin.js`).
 

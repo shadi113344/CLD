@@ -656,6 +656,7 @@ function renderSettings() {
 
     <section><h3>Capture</h3>
       <label class="check"><input type="checkbox" name="captureX"> X / Twitter bookmarks (captured while you view x.com/i/bookmarks)</label>
+      <label class="check"><input type="checkbox" name="xAutoSync"> Scroll the X bookmarks page automatically so older bookmarks load too</label>
       <label class="check"><input type="checkbox" name="captureReddit"> Reddit saved posts and comments</label>
       <label class="check"><input type="checkbox" name="redditAutoSync"> Sync Reddit quietly while browsing reddit.com (every 6 hours at most)</label>
       <label class="check"><input type="checkbox" name="captureLinkedIn"> LinkedIn saved posts (captured while you view the Saved posts page)</label>

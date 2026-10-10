@@ -3,12 +3,26 @@
   if (window.__stashToast) return;
   let host, root, timer;
 
+  // Keep the card attached even if the page re-renders and drops foreign nodes.
+  function attach() {
+    if (host && !host.isConnected) (document.body || document.documentElement).appendChild(host);
+  }
+  setInterval(attach, 1000);
+
   function mount() {
-    if (host) return;
+    if (host) return attach();
     host = document.createElement('div');
     host.style.cssText = 'position:fixed;z-index:2147483647;bottom:20px;right:20px;';
     root = host.attachShadow({ mode: 'closed' });
-    root.innerHTML = `<style>
+    // Built with DOM calls, not innerHTML, so pages that enforce Trusted Types (like X) can't block it.
+    const el = (tag, cls, ...kids) => {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      e.append(...kids);
+      return e;
+    };
+    const style = el('style');
+    style.textContent = `
       :host{all:initial}
       .box{font:500 13px/1.4 system-ui,-apple-system,sans-serif;background:#16161d;color:#fff;border-radius:12px;
         box-shadow:0 8px 28px rgba(0,0,0,.3);width:290px;overflow:hidden}
@@ -28,13 +42,18 @@
       button{all:unset;cursor:pointer;font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;background:#2c2c38}
       button.primary{background:#6d5efc}
       button:hover{filter:brightness(1.15)}
-      .x{background:none;padding:0 2px;opacity:.6;font-size:15px;line-height:1}
-    </style>
-    <div class="box prog" hidden><div class="row"><span class="logo"></span><span class="title"></span><button class="x" aria-label="Close">×</button></div>
-      <div class="detail"></div><div class="bar"><div class="fill"></div></div><div class="btns"></div></div>
-    <div class="box toast"></div>`;
+      .x{background:none;padding:0 2px;opacity:.6;font-size:15px;line-height:1}`;
+    const close = el('button', 'x', '×');
+    close.setAttribute('aria-label', 'Close');
+    const prog = el('div', 'box prog',
+      el('div', 'row', el('span', 'logo'), el('span', 'title'), close),
+      el('div', 'detail'),
+      el('div', 'bar', el('div', 'fill')),
+      el('div', 'btns'));
+    prog.hidden = true;
+    root.append(style, prog, el('div', 'box toast'));
     root.querySelector('.x').onclick = () => window.__stashProgress.hide();
-    document.documentElement.appendChild(host);
+    (document.body || document.documentElement).appendChild(host);
   }
 
   window.__stashToast = (text) => {

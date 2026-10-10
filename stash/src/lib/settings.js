@@ -7,6 +7,7 @@ export const DEFAULTS = {
 
   // Capture
   captureX: true,
+  xAutoSync: true, // auto-scroll x.com/i/bookmarks to load older bookmarks
   captureReddit: true,
   captureLinkedIn: true,
   redditAutoSync: true,
