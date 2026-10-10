@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stash</title>
+  <link rel="icon" href="../../icons/icon32.png">
+  <link rel="stylesheet" href="library.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="side" id="side">
+      <div class="brand"><span class="logo"></span><span id="brandName">Stash</span></div>
+      <button class="primary wide" id="saveTab" hidden>Save this tab <kbd>Alt+Shift+S</kbd></button>
+      <nav id="nav"></nav>
+    </aside>
+    <main class="main">
+      <header class="bar">
+        <button class="icon only-panel" id="menuBtn" aria-label="Menu">☰</button>
+        <div class="search">
+          <input id="q" type="search" placeholder="Search your bookmarks…  ( / )" autocomplete="off" aria-label="Search">
+        </div>
+        <button class="ghost" id="paletteBtn" title="Command palette">⌘K</button>
+      </header>
+      <section id="view"></section>
+    </main>
+  </div>
+
+  <div class="palette" id="palette" hidden>
+    <div class="palette-box" role="dialog" aria-label="Command palette">
+      <input id="paletteInput" placeholder="Type a command or search…" autocomplete="off">
+      <ul id="paletteList" role="listbox"></ul>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script type="module" src="library.js"></script>
+</body>
+</html>
