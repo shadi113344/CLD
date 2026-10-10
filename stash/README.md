@@ -36,6 +36,10 @@ Compared with the original extension: it doesn't send bookmarks to a vendor serv
 - **Reddit:** syncs quietly when you visit reddit.com (at most every 6 hours), or use **Sync Reddit now**, which shows a progress card. It uses your logged-in session through Reddit's JSON endpoints.
 - **LinkedIn:** open **My items → Saved posts** and scroll. LinkedIn has no API for this, so posts are read from the page. If LinkedIn changes its markup, this is the part most likely to need a fix (`src/content/linkedin.js`).
 
+## X Following / Followers lists
+
+Open `x.com/<handle>/following` or `/followers` and click **Save this list** on the card. Stash goes through the whole list (with progress) and adds it under **People on X** in the library: name, handle, bio, website, location, follower counts. With both of your lists saved you also get **Not following back** and **You don't follow back**. Every people list has the same Export menu (CSV, JSON, Markdown, web page, PDF, links). Saving a list again updates it and removes anyone no longer on it.
+
 ## Keyboard
 
 | Where | Keys |

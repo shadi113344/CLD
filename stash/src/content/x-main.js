@@ -1,11 +1,55 @@
 // Runs in the page's own JS world on x.com so it can see the responses X's
-// web app already receives. It only reads the Bookmarks timeline; nothing
-// is modified or re-requested. Parsed tweets are handed to x-bridge.js.
+// web app already receives: the Bookmarks timeline, and Following/Followers
+// lists. Parsed items are handed to x-bridge.js. When asked, it requests the
+// following pages the same way X's app does when you scroll.
 (() => {
   if (window.__stashXHooked) return;
   window.__stashXHooked = true;
 
   const BOOKMARK_OPS = /\/graphql\/[^/]+\/(Bookmarks|BookmarkSearchTimeline|BookmarkFolderTimeline)\b/;
+  const PEOPLE_OPS = /\/graphql\/[^/]+\/(Following|Followers|BlueVerifiedFollowers)\b/;
+  const kindOf = (url) => (BOOKMARK_OPS.test(url) ? 'bookmarks' : PEOPLE_OPS.test(url) ? 'people' : null);
+
+  function userFrom(r) {
+    if (r?.__typename === 'UserUnavailable' || !r?.rest_id) return null;
+    const handle = r.core?.screen_name || r.legacy?.screen_name;
+    if (!handle) return null;
+    const leg = r.legacy || {};
+    let site = leg.entities?.url?.urls?.[0]?.expanded_url || '';
+    let bio = leg.description || r.profile_bio?.description || '';
+    for (const u of leg.entities?.description?.urls || []) bio = bio.replace(u.url, u.expanded_url);
+    return {
+      id: 'x:' + r.rest_id,
+      platform: 'x',
+      handle,
+      name: r.core?.name || leg.name || handle,
+      bio,
+      url: `https://x.com/${handle}`,
+      website: site,
+      location: r.location?.location || leg.location || '',
+      avatar: r.avatar?.image_url || leg.profile_image_url_https || '',
+      followers: leg.followers_count ?? null,
+      following: leg.friends_count ?? null,
+      verified: Boolean(r.is_blue_verified || leg.verified),
+      joinedAt: Date.parse(r.core?.created_at || leg.created_at) || 0,
+    };
+  }
+
+  function extractPeople(json) {
+    const out = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node.entryId && /^user-/.test(node.entryId)) {
+        const u = userFrom(node.content?.itemContent?.user_results?.result);
+        if (u) out.push(u);
+        return;
+      }
+      for (const k in node) walk(node[k]);
+    };
+    walk(json);
+    return out;
+  }
 
   function tweetFrom(result) {
     let r = result;
@@ -51,15 +95,21 @@
     return out;
   }
 
-  function emit(json) {
+  function emit(json, kind = 'bookmarks') {
+    if (kind === 'people') {
+      const people = extractPeople(json);
+      if (people.length) window.postMessage({ __stash: 'x-people', people }, location.origin);
+      return people.length;
+    }
     const tweets = extract(json);
     if (tweets.length) window.postMessage({ __stash: 'x-bookmarks', tweets }, location.origin);
+    return tweets.length;
   }
 
   // ---- request template: the exact request X's own app made for page 1 ----
   // Remembered so Stash can ask for the following pages the same way X does
   // when you scroll, without depending on scrolling or the page layout.
-  let template = null; // { url, headers }
+  const templates = {}; // kind -> { url, headers }
 
   function headersToObject(h) {
     const out = {};
@@ -70,10 +120,10 @@
     return out;
   }
 
-  function remember(url, headers) {
-    if (!/\/Bookmarks\b/.test(url) && template) return; // prefer the main Bookmarks timeline
-    template = { url: new URL(url, location.origin).toString(), headers };
-    window.postMessage({ __stash: 'x-template' }, location.origin);
+  function remember(kind, url, headers) {
+    if (kind === 'bookmarks' && !/\/Bookmarks\b/.test(url) && templates.bookmarks) return; // prefer the main timeline
+    templates[kind] = { url: new URL(url, location.origin).toString(), headers };
+    window.postMessage({ __stash: 'x-template', kind }, location.origin);
   }
 
   const origFetch = window.fetch;
@@ -82,10 +132,11 @@
     try {
       const req = args[0];
       const url = typeof req === 'string' ? req : req?.url || String(req);
-      if (url && BOOKMARK_OPS.test(url)) {
+      const kind = url && kindOf(url);
+      if (kind) {
         const headers = { ...headersToObject(req instanceof Request ? req.headers : null), ...headersToObject(args[1]?.headers) };
-        if (res.ok) remember(url, headers);
-        res.clone().json().then(emit).catch(() => {});
+        if (res.ok) remember(kind, url, headers);
+        res.clone().json().then((j) => emit(j, kind)).catch(() => {});
       }
     } catch {}
     return res;
@@ -98,12 +149,13 @@
     return origSetHeader.call(this, k, v);
   };
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    if (typeof url === 'string' && BOOKMARK_OPS.test(url)) {
+    const kind = typeof url === 'string' && kindOf(url);
+    if (kind) {
       this.__stashHeaders = {};
       this.addEventListener('load', () => {
         try {
-          if (this.status >= 200 && this.status < 300) remember(url, this.__stashHeaders);
-          emit(this.responseType === 'json' ? this.response : JSON.parse(this.responseText));
+          if (this.status >= 200 && this.status < 300) remember(kind, url, this.__stashHeaders);
+          emit(this.responseType === 'json' ? this.response : JSON.parse(this.responseText), kind);
         } catch {}
       });
     }
@@ -127,7 +179,7 @@
     return cursor;
   }
 
-  function pageUrl(cursor, count) {
+  function pageUrl(template, cursor, count) {
     const u = new URL(template.url);
     const vars = JSON.parse(u.searchParams.get('variables') || '{}');
     if (cursor) vars.cursor = cursor;
@@ -137,12 +189,14 @@
     return u.toString();
   }
 
-  const post = (m) => window.postMessage({ __stash: 'x-paginate-status', ...m }, location.origin);
+  let post = () => {};
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let stopRequested = false;
 
-  async function paginate() {
+  async function paginate(kind) {
     stopRequested = false;
+    post = (m) => window.postMessage({ __stash: 'x-paginate-status', kind, ...m }, location.origin);
+    const template = templates[kind];
     if (!template) return post({ state: 'error', error: 'no-template' });
     let cursor = null;
     let count = 100; // fewer, larger pages; falls back to X's own size if refused
@@ -152,7 +206,7 @@
     while (!stopRequested) {
       let res;
       try {
-        res = await origFetch(pageUrl(cursor, count), { headers: template.headers, credentials: 'include' });
+        res = await origFetch(pageUrl(template, cursor, count), { headers: template.headers, credentials: 'include' });
       } catch (e) {
         res = { ok: false, status: 0 };
       }
@@ -176,14 +230,13 @@
         return post({ state: 'error', error: 'bad response', page });
       }
       if (json?.errors && !json?.data) return post({ state: 'error', error: json.errors[0]?.message || 'X error', page });
-      const tweets = extract(json);
+      const got = emit(json, kind);
       page++;
-      if (tweets.length) window.postMessage({ __stash: 'x-bookmarks', tweets }, location.origin);
       const next = bottomCursor(json);
-      post({ state: 'page', page, got: tweets.length });
-      // X always sends a bottom cursor; bookmarks without one means we misread the response.
-      if (tweets.length && !next) return post({ state: 'error', error: 'no next-page cursor', page });
-      if (!tweets.length || seenCursors.has(next)) return post({ state: 'done', page });
+      post({ state: 'page', page, got });
+      // X always sends a bottom cursor; items without one means we misread the response.
+      if (got && !next) return post({ state: 'error', error: 'no next-page cursor', page });
+      if (!got || seenCursors.has(next)) return post({ state: 'done', page });
       seenCursors.add(next);
       cursor = next;
       await sleep(900 + Math.random() * 900);
@@ -193,8 +246,9 @@
 
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
-    if (e.data?.__stash === 'x-paginate') paginate();
+    const kind = e.data?.kind || 'bookmarks';
+    if (e.data?.__stash === 'x-paginate') paginate(kind);
     if (e.data?.__stash === 'x-paginate-stop') stopRequested = true;
-    if (e.data?.__stash === 'x-template-query') template && window.postMessage({ __stash: 'x-template' }, location.origin);
+    if (e.data?.__stash === 'x-template-query') templates[kind] && window.postMessage({ __stash: 'x-template', kind }, location.origin);
   });
 })();

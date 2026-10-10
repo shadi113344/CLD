@@ -13,7 +13,7 @@
     if (host) return attach();
     host = document.createElement('div');
     host.style.cssText = 'position:fixed;z-index:2147483647;bottom:20px;right:20px;';
-    root = host.attachShadow({ mode: 'closed' });
+    root = host.attachShadow({ mode: 'open' });
     // Built with DOM calls, not innerHTML, so pages that enforce Trusted Types (like X) can't block it.
     const el = (tag, cls, ...kids) => {
       const e = document.createElement(tag);

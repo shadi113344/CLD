@@ -278,6 +278,19 @@ const handlers = {
     scheduleEnrich();
     return { added: added.length, total: items.length };
   },
+  async ingestPeople({ owner, relation, people }) {
+    const added = await db.upsertPeople(owner, relation, people);
+    broadcast({ type: 'changed' });
+    return { added };
+  },
+  async peopleFinalize({ owner, relation, keepIds }) {
+    const removed = await db.finalizePeopleList(owner, relation, keepIds);
+    broadcast({ type: 'changed' });
+    return { removed };
+  },
+  async openLibrary({ hash }) {
+    openLibrary(hash || '');
+  },
   async quickSaveApply({ id, tags, collectionId, note }) {
     await db.patchBookmark(id, { tags, collectionId, note });
     broadcast({ type: 'changed' });

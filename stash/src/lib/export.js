@@ -5,7 +5,8 @@ import * as db from './db.js';
 export async function exportJson() {
   const bookmarks = (await db.allBookmarks()).map(({ embedding, ...b }) => b);
   const collections = await db.allCollections();
-  return new Blob([JSON.stringify({ app: 'stash', version: 1, exportedAt: new Date().toISOString(), collections, bookmarks }, null, 2)], {
+  const people = await db.allPeople();
+  return new Blob([JSON.stringify({ app: 'stash', version: 1, exportedAt: new Date().toISOString(), collections, bookmarks, people }, null, 2)], {
     type: 'application/json',
   });
 }
@@ -14,6 +15,12 @@ export async function importJson(text) {
   const data = JSON.parse(text);
   if (data?.app !== 'stash' || !Array.isArray(data.bookmarks)) throw new Error('Not a Stash backup file.');
   for (const c of data.collections || []) await db.putCollection(c);
+  for (const p of data.people || []) {
+    for (const key of Object.keys(p.lists || {})) {
+      const [owner, relation] = key.split('/');
+      await db.upsertPeople(owner, relation, [p]);
+    }
+  }
   let added = 0;
   for (const b of data.bookmarks) {
     if (!b?.id) continue;
@@ -251,6 +258,72 @@ export function exportList(list, format, title, collections) {
       return { ext: 'txt', blob: blob(r.map((x) => x.url).join('\n') + '\n', 'text/plain') };
     case 'pdf':
       return { html: htmlPage(title, r) };
+  }
+  throw new Error('Unknown format ' + format);
+}
+
+// ---------- people list export ----------
+
+function peopleRows(list) {
+  const day = (t) => (t ? new Date(t).toISOString().slice(0, 10) : '');
+  return list.map((p) => ({
+    name: p.name,
+    handle: '@' + p.handle,
+    url: p.url,
+    bio: p.bio || '',
+    website: p.website || '',
+    location: p.location || '',
+    followers: p.followers ?? '',
+    following: p.following ?? '',
+    verified: p.verified ? 'yes' : '',
+    joined: day(p.joinedAt),
+  }));
+}
+
+export function exportPeople(list, format, title) {
+  const r = peopleRows(list);
+  const blob = (text, type) => new Blob([text], { type: `${type};charset=utf-8` });
+  const num = (n) => (n === '' ? '' : Number(n).toLocaleString('en'));
+  const html = () => {
+    const items = r
+      .map(
+        (x) => `<li><a href="${escHtml(x.url)}">${escHtml(x.name)}</a> <span class="m">${escHtml(x.handle)}${x.verified ? ' ✓' : ''}</span>
+      ${x.bio ? `<div class="n">${escHtml(x.bio)}</div>` : ''}
+      <div class="m">${[x.followers !== '' && `${num(x.followers)} followers`, x.following !== '' && `${num(x.following)} following`, x.location, x.website].filter(Boolean).map(escHtml).join(' · ')}</div></li>`,
+      )
+      .join('\n');
+    return htmlPage(title, []).replace('<ol></ol>', () => `<ol>${items}</ol>`).replace('0 links', () => `${r.length} ${r.length === 1 ? 'person' : 'people'}`);
+  };
+  switch (format) {
+    case 'md':
+      return {
+        ext: 'md',
+        blob: blob(
+          `# ${title}\n\n${r.length} people · exported ${new Date().toISOString().slice(0, 10)}\n\n` +
+            r.map((x) => `- [${mdText(x.name)}](<${x.url}>) ${x.handle}${x.bio ? ` — ${x.bio.replace(/\s+/g, ' ')}` : ''}`).join('\n') +
+            '\n',
+          'text/markdown',
+        ),
+      };
+    case 'csv': {
+      const cols = ['name', 'handle', 'url', 'bio', 'website', 'location', 'followers', 'following', 'verified', 'joined'];
+      return { ext: 'csv', blob: blob('\ufeff' + [cols.join(','), ...r.map((x) => cols.map((c) => csvCell(x[c])).join(','))].join('\r\n'), 'text/csv') };
+    }
+    case 'json':
+      return { ext: 'json', blob: blob(JSON.stringify(r, null, 2), 'application/json') };
+    case 'html':
+      return { ext: 'html', blob: blob(html(), 'text/html') };
+    case 'bookmarks': {
+      const items = r.map((x) => `        <DT><A HREF="${escHtml(x.url)}">${escHtml(`${x.name} (${x.handle})`)}</A>`).join('\n');
+      return {
+        ext: 'html',
+        blob: blob(`<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n    <DT><H3>${escHtml(title)}</H3>\n    <DL><p>\n${items}\n    </DL><p>\n</DL><p>\n`, 'text/html'),
+      };
+    }
+    case 'txt':
+      return { ext: 'txt', blob: blob(r.map((x) => x.url).join('\n') + '\n', 'text/plain') };
+    case 'pdf':
+      return { html: html() };
   }
   throw new Error('Unknown format ' + format);
 }

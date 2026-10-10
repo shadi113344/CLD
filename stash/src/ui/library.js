@@ -1,7 +1,7 @@
 import * as db from '../lib/db.js';
 import { getSettings, saveSettings, apiConfigured, DEFAULTS } from '../lib/settings.js';
 import { rank, cosine } from '../lib/search.js';
-import { exportJson, importJson, exportMarkdownZip, exportList, LIST_FORMATS } from '../lib/export.js';
+import { exportJson, importJson, exportMarkdownZip, exportList, exportPeople, LIST_FORMATS } from '../lib/export.js';
 
 const PANEL = location.pathname.endsWith('panel.html');
 const PAGE = 150;
@@ -12,6 +12,8 @@ const state = {
   bookmarks: [],
   byId: new Map(),
   collections: [],
+  people: [],
+  peopleSort: 'followers',
   route: { view: 'all', arg: '' },
   query: '',
   queryVec: null,
@@ -102,7 +104,8 @@ function applyLook() {
 // ---------- data ----------
 
 async function load() {
-  const [settings, bookmarks, collections] = await Promise.all([getSettings(), db.allBookmarks(), db.allCollections()]);
+  const [settings, bookmarks, collections, people] = await Promise.all([getSettings(), db.allBookmarks(), db.allCollections(), db.allPeople()]);
+  state.people = people;
   state.settings = settings;
   state.bookmarks = bookmarks;
   state.byId = new Map(bookmarks.map((b) => [b.id, b]));
@@ -188,6 +191,7 @@ function renderNav() {
     `<h4>Collections <button id="newColl" title="New collection" aria-label="New collection">+</button></h4>`,
     ...collections.map((c) => link('#c/' + c.id, esc(c.name), count((b) => b.collectionId === c.id))),
     collections.length ? '' : `<a href="#" id="newColl2" class="n"><span class="n">+ New collection</span></a>`,
+    ...peopleNav(link),
     topTags.length ? `<h4>Tags</h4>` : '',
     ...topTags.map(([t, n]) => link('#t/' + t, '#' + esc(t), n)),
     `<h4>&nbsp;</h4>`,
@@ -198,6 +202,123 @@ function renderNav() {
     if (el) el.onclick = (e) => (e.preventDefault(), newCollection());
   }
 }
+
+// ---------- people (X Following / Followers) ----------
+
+const REL_LABEL = { following: 'Following', followers: 'Followers', verified_followers: 'Verified followers' };
+
+function peopleLists() {
+  const lists = new Map(); // 'owner/relation' -> count
+  for (const p of state.people) for (const k of Object.keys(p.lists || {})) lists.set(k, (lists.get(k) || 0) + 1);
+  return lists;
+}
+
+function peopleNav(link) {
+  const lists = peopleLists();
+  if (!lists.size) return [];
+  const owners = [...new Set([...lists.keys()].map((k) => k.split('/')[0]))].sort();
+  const out = [`<h4>People on X</h4>`];
+  for (const o of owners) {
+    for (const rel of Object.keys(REL_LABEL)) if (lists.has(`${o}/${rel}`)) out.push(link(`#p/${o}/${rel}`, `@${esc(o)} · ${REL_LABEL[rel]}`, lists.get(`${o}/${rel}`)));
+    if (lists.has(`${o}/following`) && lists.has(`${o}/followers`)) {
+      out.push(link(`#p/${o}/notback`, `@${esc(o)} · Not following back`, peopleFor(o, 'notback').length));
+      out.push(link(`#p/${o}/fans`, `@${esc(o)} · You don't follow back`, peopleFor(o, 'fans').length));
+    }
+  }
+  return out;
+}
+
+// notback: you follow them, they don't follow you. fans: they follow you, you don't follow them.
+function peopleFor(owner, rel) {
+  const on = (p, r) => Boolean(p.lists?.[`${owner}/${r}`]);
+  if (rel === 'notback') return state.people.filter((p) => on(p, 'following') && !on(p, 'followers'));
+  if (rel === 'fans') return state.people.filter((p) => on(p, 'followers') && !on(p, 'following'));
+  return state.people.filter((p) => on(p, rel));
+}
+
+function peopleTitle() {
+  const [owner, rel] = state.route.arg.split('/');
+  const label = { ...REL_LABEL, notback: 'Not following back', fans: "Followers you don't follow back" }[rel] || rel;
+  return `@${owner} · ${label}`;
+}
+
+function currentPeople() {
+  const [owner, rel] = state.route.arg.split('/');
+  let list = peopleFor(owner, rel);
+  const q = state.query.trim().toLowerCase();
+  if (q) list = list.filter((p) => [p.name, p.handle, p.bio, p.location, p.website].join(' ').toLowerCase().includes(q));
+  const by = {
+    followers: (a, b) => (b.followers ?? -1) - (a.followers ?? -1),
+    name: (a, b) => a.name.localeCompare(b.name),
+    recent: (a, b) => (b.lists?.[`${owner}/${rel}`] || 0) - (a.lists?.[`${owner}/${rel}`] || 0),
+  };
+  return [...list].sort(by[state.peopleSort] || by.followers);
+}
+
+function fmtNum(n) {
+  if (n == null) return '';
+  return n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'K' : n.toLocaleString('en');
+}
+
+function renderPeople() {
+  const [owner, rel] = state.route.arg.split('/');
+  const list = currentPeople();
+  const shown = list.slice(0, state.limit);
+  const real = REL_LABEL[rel];
+  view.innerHTML = `<div class="toolbar">
+      <strong style="color:var(--text)">${esc(peopleTitle())}</strong>
+      <span>${list.length} ${list.length === 1 ? 'person' : 'people'}</span>
+      <span class="grow"></span>
+      ${real ? `<button class="ghost" data-pact="update">Update from X</button><button class="ghost" data-pact="delete">Delete list</button>` : ''}
+      <select id="peopleSort" aria-label="Sort"><option value="followers">Most followers</option><option value="name">Name</option><option value="recent">Recently added</option></select>
+      <select id="exportFmt" aria-label="Export this list"><option value="">Export ${list.length}…</option>${Object.entries(LIST_FORMATS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
+    </div>
+    ${list.length ? `<div class="people">${shown.map(personCard).join('')}</div>` : `<div class="empty"><p>${state.query ? 'No one matches.' : 'Nobody here.'}</p></div>`}
+    ${list.length > state.limit ? `<button class="ghost more" data-pact="more">Show more (${list.length - state.limit} left)</button>` : ''}`;
+  $('#peopleSort').value = state.peopleSort;
+  $('#peopleSort').onchange = (e) => {
+    state.peopleSort = e.target.value;
+    renderPeople();
+  };
+  $('#exportFmt').onchange = (e) => {
+    const fmt = e.target.value;
+    e.target.value = '';
+    if (!fmt) return;
+    const out = exportPeople(list, fmt, peopleTitle());
+    if (out.html) return printHtml(out.html);
+    download(out.blob, `x-${owner}-${rel}-${new Date().toISOString().slice(0, 10)}.${out.ext}`);
+    toast(`Exported ${list.length} ${list.length === 1 ? 'person' : 'people'}`);
+  };
+}
+
+function personCard(p) {
+  const meta = [p.followers != null && `${fmtNum(p.followers)} followers`, p.following != null && `${fmtNum(p.following)} following`, p.location].filter(Boolean);
+  return `<article class="person">
+    ${p.avatar ? `<img src="${esc(safeUrl(p.avatar))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<span class="ph"></span>'}
+    <div class="pbody">
+      <div><a href="${esc(safeUrl(p.url))}" target="_blank" rel="noopener"><strong>${esc(p.name)}</strong></a>${p.verified ? ' <span class="tick" title="Verified">✓</span>' : ''} <span class="hint">@${esc(p.handle)}</span></div>
+      ${p.bio ? `<div class="bio">${esc(p.bio)}</div>` : ''}
+      <div class="hint">${meta.map(esc).join(' · ')}${p.website ? ` · <a href="${esc(safeUrl(p.website))}" target="_blank" rel="noopener">${esc(host(p.website))}</a>` : ''}</div>
+    </div>
+  </article>`;
+}
+
+view.addEventListener('click', async (e) => {
+  const a = e.target.closest('[data-pact]')?.dataset.pact;
+  if (!a) return;
+  const [owner, rel] = state.route.arg.split('/');
+  if (a === 'more') {
+    state.limit += PAGE;
+    return renderPeople();
+  }
+  if (a === 'update') return chrome.tabs.create({ url: `https://x.com/${owner}/${rel}` });
+  if (a === 'delete') {
+    if (!confirm(`Delete the saved list ${peopleTitle()}?`)) return;
+    await db.deletePeopleList(owner, rel);
+    location.hash = '#all';
+    load();
+  }
+});
 
 async function newCollection(assignId) {
   const name = prompt('Collection name');
@@ -216,6 +337,7 @@ function render() {
   if (v === 'review') return renderReview();
   if (v === 'ask') return renderChat();
   if (v === 'settings') return renderSettings();
+  if (v === 'p') return renderPeople();
   renderList();
 }
 
@@ -533,6 +655,7 @@ $('#q').addEventListener('input', (e) => {
   state.queryVec = null;
   state.sel = 0;
   state.limit = PAGE;
+  if (state.route.view === 'p') return renderPeople();
   if (!['all', 's', 'c', 't'].includes(state.route.view)) location.hash = '#all';
   renderList();
   clearTimeout(qTimer);
@@ -855,6 +978,7 @@ function commands() {
     ...Object.entries(SOURCES).map(([k, v]) => ({ label: `Source: ${v}`, run: () => go('#s/' + k) })),
     ...state.collections.map((c) => ({ label: `Collection: ${c.name}`, run: () => go('#c/' + c.id) })),
     { label: 'New collection…', run: () => newCollection() },
+    ...[...peopleLists().keys()].map((k) => ({ label: `People: @${k.replace('/', ' · ')}`, run: () => go('#p/' + k) })),
     { label: 'Export JSON backup', run: async () => download(await exportJson(), 'stash-backup.json') },
     { label: 'Export Markdown (Obsidian)', run: async () => download(await exportMarkdownZip(), 'stash-markdown.zip') },
     { label: 'Import JSON backup', run: importFile },

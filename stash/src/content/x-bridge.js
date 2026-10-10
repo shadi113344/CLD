@@ -55,7 +55,7 @@
   }
 
   function stop() {
-    window.postMessage({ __stash: 'x-paginate-stop' }, location.origin);
+    window.postMessage({ __stash: 'x-paginate-stop', kind: 'bookmarks' }, location.origin);
     finish('Stopped');
   }
 
@@ -75,6 +75,8 @@
   let apiListener = null;
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
+    const isBookmarks = (e.data?.kind || 'bookmarks') === 'bookmarks';
+    if (!isBookmarks) return; // Following/Followers lists are handled by x-people.js
     if (e.data?.__stash === 'x-template') {
       if (!templateReady) log('bookmarks timeline detected on', location.pathname);
       templateReady = true;
@@ -84,7 +86,7 @@
   });
 
   async function waitForTemplate(ms) {
-    window.postMessage({ __stash: 'x-template-query' }, location.origin);
+    window.postMessage({ __stash: 'x-template-query', kind: 'bookmarks' }, location.origin);
     for (let t = 0; t < ms && !templateReady; t += 250) await sleep(250);
     return templateReady;
   }
@@ -110,7 +112,7 @@
           resolve(null);
         }
       };
-      window.postMessage({ __stash: 'x-paginate' }, location.origin);
+      window.postMessage({ __stash: 'x-paginate', kind: 'bookmarks' }, location.origin);
     }).finally(() => (apiListener = null));
   }
 

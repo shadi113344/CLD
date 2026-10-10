@@ -20,7 +20,15 @@ export function openDb() {
       db.createObjectStore('collections', { keyPath: 'id' });
       db.createObjectStore('kv', { keyPath: 'k' });
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // Let a newer Stash version upgrade the database even while this tab is open.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
   });
   return dbPromise;
@@ -33,8 +41,21 @@ function promisify(req) {
   });
 }
 
+// People (saved X Following/Followers lists) live in their own database, so adding
+// them never required upgrading the bookmarks database.
+let peopleDbPromise;
+function openPeopleDb() {
+  peopleDbPromise ??= new Promise((resolve, reject) => {
+    const req = indexedDB.open('stash-people', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('people', { keyPath: 'id' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return peopleDbPromise;
+}
+
 async function store(name, mode = 'readonly') {
-  const db = await openDb();
+  const db = name === 'people' ? await openPeopleDb() : await openDb();
   return db.transaction(name, mode).objectStore(name);
 }
 
@@ -150,7 +171,9 @@ export async function clearAll() {
   const db = await openDb();
   const tx = db.transaction(['bookmarks', 'collections', 'kv'], 'readwrite');
   for (const n of ['bookmarks', 'collections', 'kv']) tx.objectStore(n).clear();
-  return txDone(tx);
+  const ptx = (await openPeopleDb()).transaction('people', 'readwrite');
+  ptx.objectStore('people').clear();
+  return Promise.all([txDone(tx), txDone(ptx)]);
 }
 
 // ---------- collections ----------
@@ -172,6 +195,55 @@ export async function deleteCollection(id) {
   const all = await promisify(bs.getAll());
   for (const b of all) if (b.collectionId === id) bs.put({ ...b, collectionId: '' });
   return txDone(tx);
+}
+
+// ---------- people (Following / Followers lists) ----------
+// Each person records which saved lists they're on: lists['owner/relation'] = first-seen time.
+
+export async function allPeople() {
+  return promisify((await store('people')).getAll());
+}
+
+export async function upsertPeople(owner, relation, people) {
+  const key = `${owner}/${relation}`;
+  const db = await openPeopleDb();
+  const tx = db.transaction('people', 'readwrite');
+  const s = tx.objectStore('people');
+  let added = 0;
+  for (const p of people) {
+    const cur = await promisify(s.get(p.id));
+    const lists = { ...(cur?.lists || {}) };
+    if (!lists[key]) {
+      lists[key] = Date.now();
+      added++;
+    }
+    s.put({ ...(cur || {}), ...p, lists, updatedAt: Date.now() });
+  }
+  await txDone(tx);
+  return added;
+}
+
+// After a complete pass of a list, remove that list from anyone not seen in it.
+export async function finalizePeopleList(owner, relation, keepIds) {
+  const key = `${owner}/${relation}`;
+  const keep = new Set(keepIds);
+  const db = await openPeopleDb();
+  const tx = db.transaction('people', 'readwrite');
+  const s = tx.objectStore('people');
+  let removed = 0;
+  for (const p of await promisify(s.getAll())) {
+    if (!p.lists?.[key] || keep.has(p.id)) continue;
+    const { [key]: _, ...rest } = p.lists;
+    removed++;
+    if (Object.keys(rest).length) s.put({ ...p, lists: rest });
+    else s.delete(p.id);
+  }
+  await txDone(tx);
+  return removed;
+}
+
+export async function deletePeopleList(owner, relation) {
+  return finalizePeopleList(owner, relation, []);
 }
 
 // ---------- key/value ----------
