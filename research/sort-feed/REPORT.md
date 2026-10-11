@@ -234,20 +234,9 @@ There are no calls to analytics, advertising or any other third party. Everythin
 
 ## 14. Useful for Stash
 
-The Instagram saved-posts sync that `stash/HANDOFF.md` plans next is built here already. MCP's saved-posts job:
+Stash v1.6.0 already syncs Instagram saved posts. [`PLAN.md`](PLAN.md) compares that code with what Sort Feed 17.0 does and lists the changes in order.
 
-- learns the page's own `/api/v1/feed/saved/posts/` request (method, address and headers) on load
-- treats its response as page 1
-- asks again with `max_id` for each following page, with a 0.7 to 1.5 s gap
-- stops on 429, a security check, or a login page
-
-Other details worth reusing:
-
-- the media-ID-to-date decode (`pk >> 23 + 1314220021721`)
-- the Reels response key moving to `fetch__XDTUserDict.clips_connection`, and matching both `/graphql/query` and `/api/graphql`
-- the "fake an empty last page" trick to stop TikTok's endless spinner
-- `/api/v1/media/{pk}/info/` with `x-ig-app-id: 936619743392459` for media links
-- the median-of-25 outlier score, if Stash ever ranks saved posts by performance
+The most urgent one: Sort Feed's notes say Instagram retired the REST collection endpoint (`/api/v1/feed/collection/<id>/posts/`) in September 2026. Collections now load over GraphQL (`PolarisSavedCollectionPageWWWQuery`, answer under `data.fetch__MediaCollection`). Stash v1.6.0 still pages the REST path, and its fake Instagram still serves it, so the tests can't catch the problem.
 
 ## How to reproduce
 

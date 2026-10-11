@@ -57,7 +57,14 @@ The user's choices: **both** live sync and export import; **thumbnails plus link
 2. Check that thumbnails appear in Stash a minute after the sync (Instagram view).
 3. Import your real export zip and check the counts in the toast.
 
+## Next: plan from the Sort Feed analysis
+
+`research/sort-feed/` at the repo root has a reverse-engineering report on Sort Feed 17.0 (`REPORT.md`) and a plan for Stash (`PLAN.md`). Sort Feed is a 90,000-user extension that reads the same Instagram data as Stash.
+
+**Do item 1 of the plan first.** Sort Feed's notes say Instagram retired `/api/v1/feed/collection/<id>/posts/` in September 2026. Collections now load over GraphQL (`PolarisSavedCollectionPageWWWQuery`, answer under `data.fetch__MediaCollection`). `ig-bridge.js` still pages the REST path, and the fake Instagram still serves it, so the 61 checks can't catch it. The plan lists the exact changes to `ig-main.js`, `ig-bridge.js`, the fake and the tests.
+
 ## Ideas not started
 
 - People lists for Instagram (followers/following), like X.
+- From the Sort Feed plan: sort saved Instagram posts by views, likes and comments (item 3), and on-device transcripts of saved Reels with Whisper (item 4).
 - Re-fetching captions for export-only posts without a live sync. That would mean one request per post, which is risky on Instagram, so it was deliberately left out.
