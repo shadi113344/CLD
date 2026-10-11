@@ -43,10 +43,13 @@ Compared with the original extension: it doesn't send bookmarks to a vendor serv
 
 - Saved first, newest first, then each of your collections. One request every 2.5–4.5 seconds, with a progress card in the corner and a **Stop** button.
 - The first sync goes to your oldest saved post. Later ones stop when they reach posts Stash already has, and run automatically at most once an hour.
-- For each post Stash keeps the link (`/p/…` or `/reel/…`), caption, location, author's name and @username, post date, type (photo, video, reel or carousel), and your saved order.
+- For each post Stash keeps the link (`/p/…` or `/reel/…`), caption, location, author's name and @username, post date, type (photo, video, reel or carousel), your saved order, and its likes, comments and views (Reels and videos) as Instagram showed them at that sync.
 - **Collections are mirrored** as Stash collections. A post in two Instagram collections shows in both. If you rename a mirrored collection in Stash, your name is kept. If you delete one, it stays deleted. A full rescan also removes posts you took out of a collection on Instagram.
+- **Collections need one visit first.** Since September 2026 Instagram loads a collection through a GraphQL request whose ID changes over time, so Stash learns it from Instagram's own page: open any one collection on Instagram once. Stash keeps only the request's name, ID and the shape of its variables, never your session tokens, which it reads from the page each time. Until it has seen one, a sync still saves all of Saved and the card says which collections are waiting, with a button that opens one; Stash then syncs them straight away. If Instagram changes the request again, the card asks for one more visit. (Accounts still on Instagram's old web app keep working through the old address.)
 - **If Instagram pushes back** (asks to slow down, wants to confirm it's you, limits activity, or you're logged out), Stash stops at once and says why. It then won't sync automatically for 6 hours (24 hours after a checkpoint or block). **Sync anyway** on the card overrides that.
 - If Instagram stops answering Stash's requests directly, Stash falls back to scrolling the Saved grid and saving what Instagram's page loads.
+
+**Sort by how posts did.** The Instagram view (and any collection holding Instagram posts) can be sorted by **Most viewed**, **Most liked** or **Most commented**, alongside the date sorts. Cards show the counts, the details panel says when they were taken, and the next sync refreshes them. They come with the posts Stash already downloads, so they cost no extra requests. If a creator hides like counts, Stash doesn't show Instagram's placeholder number. CSV and JSON exports get `views`, `likes` and `comments` columns, and Obsidian notes get them in the frontmatter.
 
 **Thumbnails.** Instagram's image links stop working after a few days, and its image servers won't show them on other sites. So Stash keeps a small copy of each post's image (320 px WebP, typically 10–30 KB) in this browser, and the library only ever shows those copies. Turn this off in Settings if you prefer links and captions only. Videos and reels are saved as links with their cover image; Stash never downloads videos.
 
@@ -89,4 +92,4 @@ No build step. Edit the files, then click reload on `chrome://extensions`.
 
 ## Tests
 
-`node dev/test-instagram.mjs` runs the Instagram end-to-end tests: a real Chromium with Stash loaded, pointed at a fake `www.instagram.com` (`dev/fake-instagram/server.mjs`) that mimics Instagram's Saved pages, `/api/v1` responses, expiring image links and pushback. It needs Playwright with Chromium, and `python3` for building test zips.
+`node dev/test-instagram.mjs` runs the Instagram end-to-end tests: a real Chromium with Stash loaded, pointed at a fake `www.instagram.com` (`dev/fake-instagram/server.mjs`) that mimics Instagram's Saved pages, `/api/v1` responses, the GraphQL collection request (checked for page tokens and the current `doc_id`, optionally prefixed with `for (;;);`), expiring image links and pushback. It needs Playwright with Chromium, and `python3` for building test zips.

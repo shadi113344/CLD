@@ -1,8 +1,15 @@
 // A fake www.instagram.com for testing Stash without touching the real site.
 // It mimics the parts Stash relies on: the web app's Saved pages, the
-// /api/v1 endpoints they call (saved feed, collections list, collection
-// feeds) with their response shapes and paging, Instagram's CDN with links
-// that expire, and the ways Instagram pushes back (429, checkpoint, login).
+// /api/v1 endpoints they call (saved feed, collections list) with their
+// response shapes and paging, Instagram's CDN with links that expire, and the
+// ways Instagram pushes back (429, checkpoint, login).
+//
+// Collections behave like Instagram since September 2026: a collection page
+// loads over GraphQL (PolarisSavedCollectionPageWWWQuery, answer under
+// data.fetch__MediaCollection), and the old /api/v1/feed/collection/<id>/posts/
+// address is a 404 page. scenario.restCollections brings the old one back.
+// GraphQL calls are checked like the real thing: page tokens (fb_dtsg, lsd,
+// jazoest), the CSRF cookie, and the current doc_id.
 //
 // Serves HTTPS on PORT (default 8443) for www.instagram.com and
 // *.cdninstagram.com (point Chrome at it with --host-resolver-rules), and a
@@ -20,6 +27,14 @@ const APP_ID = '936619743392459';
 export const USER = 'testuser';
 const PAGE = 20;
 const CDN_HOST = 'scontent-lhr8-1.cdninstagram.com';
+const ID_EPOCH = 1314220021721n; // media ids start with ms since this moment, as on Instagram
+const SAVED_DOC = '7208457865888221'; // the saved feed over GraphQL (scenario.rest false)
+const LIST_DOC = '8812094671239082'; // the collections list over GraphQL (scenario.restCollectionsList false)
+export const COLLECTION_DOC = '9145367822183904';
+const COLLECTION_QUERY = 'PolarisSavedCollectionPageWWWQuery';
+// The page's session tokens, as Instagram embeds them in its HTML.
+const TOKENS = { dtsg: 'NAcMx3Fak3DtsG0q:17843696212148243:1760140000', lsd: 'AVqFak3Lsd9x', eimu: '17841401234567890' };
+const jazoest = (s) => '2' + [...s].reduce((n, c) => n + c.charCodeAt(0), 0);
 
 // ---------- data ----------
 
@@ -45,7 +60,8 @@ function makePost(n) {
   const kinds = ['photo', 'photo', 'reel', 'carousel', 'video'];
   const kind = kinds[n % kinds.length];
   const [username, full_name] = AUTHORS[n % AUTHORS.length];
-  const pk = String(3100000000000000000n + BigInt(n) * 7919n);
+  const taken_at = 1700000000 - n * 86400;
+  const pk = String(((BigInt(taken_at) * 1000n - ID_EPOCH) << 23n) | BigInt(n % 4096));
   const code = `C${(n * 104729 + 2147483647).toString(36)}Ab_${n % 3 ? 'x' : '-'}`;
   return {
     n,
@@ -56,7 +72,7 @@ function makePost(n) {
     full_name,
     caption: CAPTIONS[n % CAPTIONS.length],
     location: n % 4 === 0 ? 'Bergen, Norway' : null,
-    taken_at: 1700000000 - n * 86400,
+    taken_at,
   };
 }
 
@@ -76,7 +92,21 @@ export function createState() {
     posts,
     collections,
     nextN: 1000,
-    scenario: { collectionIds: true, rest: true, rateLimitAfter: Infinity, checkpointAfter: Infinity, loggedIn: true, linkTtl: 3 * 86400 },
+    scenario: {
+      collectionIds: true,
+      rest: true,
+      restCollections: false, // true: the old REST collection address still works
+      restCollectionsList: true, // false: the list address is gone and the Saved page names collections over GraphQL
+      collectionDocId: COLLECTION_DOC,
+      collectionVia: 'xhr', // how the collection page sends its GraphQL request: 'xhr' or 'fetch'
+      gqlPrefix: false, // start GraphQL answers with "for (;;);"
+      gqlWrap: false, // edges[].node.media instead of edges[].node
+      gqlTakenAt: false, // Reels in GraphQL answers come without taken_at
+      rateLimitAfter: Infinity,
+      checkpointAfter: Infinity,
+      loggedIn: true,
+      linkTtl: 3 * 86400,
+    },
     apiCount: 0,
     log: [], // { t, src, path, status }
   };
@@ -97,7 +127,11 @@ function candidates(p) {
   return [1080, 750, 640, 480, 320, 240, 150].map((w) => ({ width: w, height: Math.round(w * 1.25), url: cdnUrl(p, w, Math.round(w * 1.25)) }));
 }
 
-function media(p) {
+// Hidden like counts: Instagram still sends a small placeholder.
+export const hidesLikes = (n) => n % 17 === 3;
+export const playCount = (n) => 5000 + ((n * 7919) % 100000);
+
+function media(p, { gql = false } = {}) {
   const m = {
     taken_at: p.taken_at,
     pk: p.pk,
@@ -110,7 +144,8 @@ function media(p) {
     product_type: p.kind === 'reel' ? 'clips' : p.kind === 'carousel' ? 'carousel_container' : p.kind === 'video' ? 'feed' : 'feed',
     caption: p.caption ? { pk: '1' + p.pk, user_id: '1000', text: p.caption, type: 1, created_at: p.taken_at } : null,
     caption_is_edited: false,
-    like_count: 100 + p.n,
+    like_count: hidesLikes(p.n) ? 3 : 100 + p.n,
+    ...(hidesLikes(p.n) ? { like_and_view_counts_disabled: true } : {}),
     comment_count: p.n % 13,
     has_liked: false,
     has_viewer_saved: true,
@@ -124,7 +159,11 @@ function media(p) {
     m.carousel_media_count = 3;
     m.carousel_media = [0, 1, 2].map((k) => ({ id: `${p.pk}${k}_1`, media_type: 1, image_versions2: { candidates: candidates({ ...p, pk: p.pk + k }) } }));
   }
-  if (p.kind === 'reel' || p.kind === 'video') m.video_versions = [{ type: 101, width: 720, height: 1280, url: `https://${CDN_HOST}/o1/v/t16/${p.pk}.mp4?oe=0` }];
+  if (p.kind === 'reel' || p.kind === 'video') {
+    m.video_versions = [{ type: 101, width: 720, height: 1280, url: `https://${CDN_HOST}/o1/v/t16/${p.pk}.mp4?oe=0` }];
+    m.play_count = playCount(p.n);
+  }
+  if (gql && !S.scenario.gqlTakenAt && p.kind === 'reel') delete m.taken_at;
   if (S.scenario.collectionIds) {
     const ids = S.collections.filter((c) => c.posts.includes(p.code)).map((c) => c.id);
     if (ids.length) m.saved_collection_ids = ids;
@@ -168,10 +207,35 @@ function graphqlSaved(after) {
   const list = S.posts.slice(start, start + 12);
   const more = start + 12 < S.posts.length;
   return {
-    data: { xdt_api__v1__feed__saved__posts__connection: { edges: list.map((p) => ({ node: { media: media(p) }, cursor: cursor(start) })), page_info: { end_cursor: more ? cursor(start + 12) : null, has_next_page: more } } },
+    data: { xdt_api__v1__feed__saved__posts__connection: { edges: list.map((p) => ({ node: { media: media(p, { gql: true }) }, cursor: cursor(start) })), page_info: { end_cursor: more ? cursor(start + 12) : null, has_next_page: more } } },
     extensions: { is_final: true },
     status: 'ok',
   };
+}
+
+// A collection page, the way Instagram's web app now loads it.
+function graphqlCollection(c, vars) {
+  const first = Math.min(Number(vars.first) || 12, 50);
+  const start = vars.after ? offsetOf(vars.after) : 0;
+  const list = c.posts.slice(start, start + first).map((code) => S.posts.find((p) => p.code === code));
+  const more = start + first < c.posts.length;
+  const node = (p) => (S.scenario.gqlWrap ? { media: media(p, { gql: true }) } : media(p, { gql: true }));
+  return {
+    data: {
+      fetch__MediaCollection: {
+        id: 'MC' + c.id,
+        pk: c.id,
+        name: c.name,
+        media: { edges: list.map((p, i) => ({ node: node(p), cursor: cursor(start + i) })), page_info: { has_next_page: more, end_cursor: more ? cursor(start + first) : null } },
+      },
+    },
+    extensions: { is_final: true },
+  };
+}
+
+// The collections list over GraphQL (when its REST address is gone).
+function graphqlCollectionsList() {
+  return { data: { xdt_api__v1__collections__list_connection: { edges: collectionsList().items.map((c) => ({ node: c })) } }, extensions: { is_final: true } };
 }
 
 // ---------- images ----------
@@ -219,6 +283,8 @@ function appHtml(route) {
 main{max-width:935px;margin:0 auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.grid img{width:100%;aspect-ratio:4/5;object-fit:cover;background:#efefef}
 .tiles a{display:inline-block;margin:8px;padding:30px;border:1px solid #dbdbdb}#sentinel{height:40px}</style></head>
 <body><header>Instagram (fake, for Stash tests)</header><main id="root"></main>
+<script type="application/json" data-sjs>{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"define":[["DTSGInitialData",[],{"token":"${TOKENS.dtsg}"},258],["LSD",[],{"token":"${TOKENS.lsd}"},323],["InstagramWebConfig",[],{"IG_USER_EIMU":"${TOKENS.eimu}","server_revision":1028123456,"hsi":"7560123456789012345","haste_session":"20372.HYP:instagram_web_pkg.2.1...0"},1]]}}]]]}</script>
+<script type="application/json" data-sjs>{"require":[["SiteData",[],{"__spin_r":1028123456,"__spin_b":"trunk","__spin_t":1760140000}]]}</script>
 <script>window.__route = ${JSON.stringify(route)};</script><script src="/static/app.js"></script></body></html>`;
 }
 
@@ -229,6 +295,35 @@ const APP_JS = `
   sessionStorage.setItem('www-claim-v2', 'hmac.AR2fakeClaim');
   const csrf = () => document.cookie.split('; ').find((c) => c.startsWith('csrftoken='))?.slice(10) || '';
   const headers = () => ({ 'X-IG-App-ID': '${APP_ID}', 'X-CSRFToken': csrf(), 'X-Requested-With': 'XMLHttpRequest', 'X-ASBD-ID': '129477', 'X-IG-WWW-Claim': sessionStorage.getItem('www-claim-v2'), 'X-Web-Session-ID': 'abc:def:ghi' });
+  // The app's own copy of the page tokens (Instagram reads them from its module system).
+  const sjs = [...document.querySelectorAll('script[data-sjs]')].map((s) => s.textContent).join('');
+  const token = (name) => sjs.split('"' + name + '",[],{"token":"')[1].split('"')[0];
+  const jazoest = (s) => '2' + [...s].reduce((n, c) => n + c.charCodeAt(0), 0);
+  let reqNo = 20;
+  // A Relay request, with the form fields and headers Instagram's web app sends.
+  async function relay(docId, friendly, rootField, variables, via) {
+    const dtsg = token('DTSGInitialData');
+    const lsd = token('LSD');
+    const body = new URLSearchParams({
+      av: '${TOKENS.eimu}', __d: 'www', __user: '0', __a: '1', __req: (reqNo++).toString(36), __hs: '20372.HYP:instagram_web_pkg.2.1...0', dpr: '1', __ccg: 'EXCELLENT',
+      __rev: '1028123456', __s: 'abc:def:ghi', __hsi: '7560123456789012345', __dyn: '7xeUjG1mxu1syUbFp41twpUnwgU7SbzEdF8aUco2qwJw5ux609vCwjE1xoswaq0yE462mcw5Mx62G5UswoEcE7O2l0Fwqo31w9a9wtUd8-U2zxe2GewGw9a361qw8Xxm16wUwtE1wEbUGdG1QwTU9UaQ0Lo6',
+      __csr: 'gfY4n2IX9sR4O5b9T5RkjOpEGWh9t8B', __comet_req: '7', fb_dtsg: dtsg, jazoest: jazoest(dtsg), lsd, __spin_r: '1028123456', __spin_b: 'trunk', __spin_t: '1760140000',
+      __crn: 'comet.igweb.PolarisSavedCollectionRoute', fb_api_caller_class: 'RelayModern', fb_api_req_friendly_name: friendly, variables: JSON.stringify(variables), server_timestamps: 'true', doc_id: docId,
+    }).toString();
+    const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-ASBD-ID': '359341', 'X-CSRFToken': csrf(), 'X-FB-Friendly-Name': friendly, 'X-FB-LSD': lsd, 'X-IG-App-ID': '${APP_ID}', 'X-Root-Field-Name': rootField, 'X-BLOKS-VERSION-ID': 'f0fd53409d7667526e529854656fe20159af8b76db89f40c333e593b51a2ce10' };
+    const url = '/api/graphql?__src=app';
+    let text;
+    if (via === 'fetch') text = await (await fetch(url, { method: 'POST', headers, body })).text();
+    else text = await new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open('POST', url);
+      for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
+      x.onload = () => resolve(x.responseText);
+      x.onerror = reject;
+      x.send(body);
+    });
+    return JSON.parse(text.startsWith('for (;;);') ? text.slice(9) : text);
+  }
   const xhrJson = (url) => new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open('GET', url);
@@ -268,12 +363,34 @@ const APP_JS = `
     let after = null;
     infinite(async () => {
       const body = new URLSearchParams({ doc_id: '7208457865888221', variables: JSON.stringify({ after, first: 12 }) });
-      const r = await fetch('/graphql/query', { method: 'POST', body, headers: { ...headers(), 'Content-Type': 'application/x-www-form-urlencoded' } });
+      const r = await fetch('/graphql/query?__src=app', { method: 'POST', body, headers: { ...headers(), 'Content-Type': 'application/x-www-form-urlencoded' } });
       const j = await r.json();
       const c = j.data.xdt_api__v1__feed__saved__posts__connection;
       addTiles(g, c.edges.map((e) => e.node.media));
       after = c.page_info.end_cursor;
       return c.page_info.has_next_page;
+    });
+  } else if (route.type === 'collection' && route.graphql) {
+    const g = grid();
+    let after = null;
+    infinite(async () => {
+      const j = await relay(route.docId, '${COLLECTION_QUERY}', 'fetch__MediaCollection', { after, collection_id: route.id, first: 12, __relay_internal__pv__PolarisIsLoggedInrelayprovider: true }, route.via);
+      const media = j.data.fetch__MediaCollection.media;
+      addTiles(g, media.edges.map((e) => e.node.media || e.node));
+      after = media.page_info.end_cursor;
+      return media.page_info.has_next_page;
+    });
+  } else if (route.type === 'saved' && route.graphqlList) {
+    relay('${LIST_DOC}', 'PolarisSavedCollectionsListQuery', 'xdt_api__v1__collections__list_connection', { first: 50 }, 'fetch').then((j) => {
+      const t = document.createElement('div');
+      t.className = 'tiles';
+      for (const { node: c } of j.data.xdt_api__v1__collections__list_connection.edges) {
+        const a = document.createElement('a');
+        a.textContent = c.collection_name + ' (' + (c.collection_media_count ?? 0) + ')';
+        a.href = c.collection_type === 'ALL_MEDIA_AUTO_COLLECTION' ? '/${USER}/saved/all-posts/' : '/${USER}/saved/' + encodeURIComponent(c.collection_name) + '/' + c.collection_id + '/';
+        t.append(a);
+      }
+      root.append(t);
     });
   } else if (route.type === 'all-posts' || route.type === 'collection') {
     const g = grid();
@@ -310,8 +427,8 @@ function route(pathname) {
   const m = pathname.match(/^\/([^/]+)\/saved\/(?:(all-posts)|([^/]+)\/(\d+))?\/?$/);
   if (!m) return { type: 'home' };
   if (m[2]) return { type: 'all-posts', graphql: !S.scenario.rest };
-  if (m[4]) return { type: 'collection', id: m[4] };
-  return { type: 'saved' };
+  if (m[4]) return { type: 'collection', id: m[4], graphql: !S.scenario.restCollections, docId: S.scenario.collectionDocId, via: S.scenario.collectionVia };
+  return { type: 'saved', graphqlList: !S.scenario.restCollectionsList };
 }
 
 // ---------- server ----------
@@ -324,6 +441,48 @@ function send(res, status, body, headers = {}) {
 
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split('; ').filter(Boolean).map((c) => [c.slice(0, c.indexOf('=')), c.slice(c.indexOf('=') + 1)]));
 
+const NOT_FOUND_PAGE = `<!DOCTYPE html><html lang="en"><head><title>Page not found • Instagram</title></head><body><h2>Sorry, this page isn't available.</h2><p>The link you followed may be broken, or the page may have been removed.</p></body></html>`;
+
+// Rate limit and checkpoint, shared by REST and GraphQL. Returns [status, body] or null.
+function pushback() {
+  S.apiCount++;
+  if (S.apiCount > S.scenario.rateLimitAfter) return [429, { message: 'Please wait a few minutes before you try again.', require_login: false, status: 'fail' }];
+  if (S.apiCount > S.scenario.checkpointAfter) return [400, { message: 'checkpoint_required', checkpoint_url: 'https://www.instagram.com/challenge/?next=/api/v1/feed/saved/posts/', lock: true, status: 'fail' }];
+  return null;
+}
+
+function graphql(req, res, url, form) {
+  const src = url.searchParams.get('__src') === 'app' ? 'app' : 'ext';
+  const docId = form.get('doc_id') || '';
+  const entry = { t: Date.now(), src, path: url.pathname, query: '', doc: form.get('fb_api_req_friendly_name') || docId, status: 0 };
+  S.log.push(entry);
+  let vars = {};
+  try {
+    vars = JSON.parse(form.get('variables') || '{}');
+  } catch {}
+  entry.vars = vars;
+  const reply = (status, body) => {
+    entry.status = status;
+    if (!S.scenario.gqlPrefix || status !== 200) return send(res, status, body);
+    send(res, status, 'for (;;);' + JSON.stringify(body), { 'content-type': 'text/javascript; charset=utf-8' });
+  };
+  if (docId === SAVED_DOC) return reply(200, graphqlSaved(vars.after));
+  if (!S.scenario.loggedIn || !cookies(req).sessionid) return reply(401, { message: 'login_required', status: 'fail', require_login: true });
+  if (req.headers['x-ig-app-id'] !== APP_ID) return reply(400, { message: 'useragent mismatch', status: 'fail' });
+  if (!req.headers['x-csrftoken'] || req.headers['x-csrftoken'] !== cookies(req).csrftoken) return reply(403, { message: 'CSRF token missing or incorrect', status: 'fail' });
+  if (form.get('fb_dtsg') !== TOKENS.dtsg || form.get('lsd') !== TOKENS.lsd || req.headers['x-fb-lsd'] !== TOKENS.lsd || form.get('jazoest') !== jazoest(TOKENS.dtsg)) {
+    entry.bad = 'tokens';
+    return reply(200, { error: 1357004, errorSummary: 'Sorry, something went wrong', errorDescription: 'Please try closing and re-opening your browser window.', payload: null });
+  }
+  const pb = pushback();
+  if (pb) return reply(...pb);
+  if (docId === LIST_DOC) return reply(200, graphqlCollectionsList());
+  if (docId !== S.scenario.collectionDocId) return reply(200, { data: null, errors: [{ message: `The query (doc_id ${docId}) is not available`, severity: 'CRITICAL', code: 1675030 }], status: 'ok' });
+  const c = S.collections.find((x) => x.id === String(vars.collection_id));
+  if (!c) return reply(200, { data: { fetch__MediaCollection: null }, extensions: { is_final: true } });
+  return reply(200, graphqlCollection(c, vars));
+}
+
 function api(req, res, url) {
   const src = url.searchParams.get('__src') === 'app' ? 'app' : 'ext';
   const entry = { t: Date.now(), src, path: url.pathname, query: url.search, status: 0 };
@@ -334,9 +493,8 @@ function api(req, res, url) {
   };
   if (!S.scenario.loggedIn || !cookies(req).sessionid) return reply(401, { message: 'login_required', status: 'fail', require_login: true });
   if (req.headers['x-ig-app-id'] !== APP_ID) return reply(400, { message: 'useragent mismatch', status: 'fail' });
-  S.apiCount++;
-  if (S.apiCount > S.scenario.rateLimitAfter) return reply(429, { message: 'Please wait a few minutes before you try again.', require_login: false, status: 'fail' });
-  if (S.apiCount > S.scenario.checkpointAfter) return reply(400, { message: 'checkpoint_required', checkpoint_url: 'https://www.instagram.com/challenge/?next=/api/v1/feed/saved/posts/', lock: true, status: 'fail' });
+  const pb = pushback();
+  if (pb) return reply(...pb);
   const p = url.pathname;
   const maxId = url.searchParams.get('max_id');
   if (p === '/api/v1/feed/saved/posts/') {
@@ -348,10 +506,11 @@ function api(req, res, url) {
     const c = S.collections.find((x) => x.id === m[1]);
     if (!c) return reply(404, { message: 'collection not found', status: 'fail' });
     if (!S.scenario.rest) return reply(404, { message: '', status: 'fail' });
+    if (!S.scenario.restCollections) return reply(404, NOT_FOUND_PAGE); // retired in September 2026
     return reply(200, feed(c.posts, maxId));
   }
   if (p === '/api/v1/collections/list/') {
-    if (!S.scenario.rest) return reply(404, { message: '', status: 'fail' });
+    if (!S.scenario.rest || !S.scenario.restCollectionsList) return reply(404, { message: '', status: 'fail' });
     return reply(200, collectionsList());
   }
   if (p === '/api/v1/web/accounts/badge/') return reply(200, { status: 'ok' });
@@ -374,14 +533,10 @@ function handler(req, res) {
     return send(res, 200, png(Math.min(+m[2], 640), Math.min(+m[3], 800), m[1].slice(-4)), { 'cross-origin-resource-policy': corp, 'cache-control': 'max-age=1209600' });
   }
   if (url.pathname.startsWith('/api/v1/')) return api(req, res, url);
-  if (url.pathname === '/graphql/query' && req.method === 'POST') {
+  if ((url.pathname === '/graphql/query' || url.pathname === '/api/graphql') && req.method === 'POST') {
     let body = '';
     req.on('data', (d) => (body += d));
-    req.on('end', () => {
-      S.log.push({ t: Date.now(), src: 'app', path: '/graphql/query', status: 200 });
-      const vars = JSON.parse(new URLSearchParams(body).get('variables') || '{}');
-      send(res, 200, graphqlSaved(vars.after));
-    });
+    req.on('end', () => graphql(req, res, url, new URLSearchParams(body)));
     return;
   }
   if (url.pathname === '/static/app.js') return send(res, 200, APP_JS, { 'content-type': 'text/javascript' });
@@ -433,6 +588,12 @@ function admin(req, res) {
         const c = S.collections.find((x) => x.id === data.collection);
         c.posts = [data.code, ...c.posts.filter((x) => x !== data.code)];
         return ok();
+      }
+      case '/collection': {
+        // A new collection on Instagram, holding the given posts (newest first).
+        const c = { id: String(17890000000000000n + BigInt(S.collections.length + 1)), name: data.name, posts: [...(data.codes || [])] };
+        S.collections.push(c);
+        return ok({ id: c.id });
       }
       case '/unfile': {
         const c = S.collections.find((x) => x.id === data.collection);

@@ -2,11 +2,13 @@
 
 Stash v1.6.0 already syncs Instagram saved posts (branch `claude/zealous-shannon-vzvr8m`). This plan compares that code with Sort Feed 17.0, which was published on 2026-10-10 and has been running against the real Instagram. It lists what to change in Stash, in order. The findings themselves are in [`REPORT.md`](REPORT.md).
 
+**Status (2026-10-11):** items 1, 2 and 3 are done in Stash v1.7.0 (see `stash/HANDOFF.md`). Item 4 waits on your go-ahead for the model download; item 5 is for later.
+
 **The first item matters most.** Sort Feed's own notes say Instagram retired the REST endpoint that Stash uses to page each collection. If that's right, collection sync in v1.6.0 will fail on the real site, even though all 61 checks pass against the fake.
 
 ---
 
-## 1. Fix: Instagram collections moved to GraphQL (do first)
+## 1. Fix: Instagram collections moved to GraphQL (done in v1.7.0)
 
 ### What Sort Feed found
 
@@ -69,13 +71,13 @@ Stash's mitigation already in place: a **full** sync skips step 3 when Saved pos
 
 **Done when:** all existing checks pass, plus the new ones, against both fake scenarios (GraphQL collections, old REST collections). The console log shows which path each collection used, so a real-world failure can still be diagnosed from the user's logs.
 
-## 2. Harden the other Instagram paths (small)
+## 2. Harden the other Instagram paths (done in v1.7.0)
 
 - **Match both GraphQL addresses:** `/graphql/query` and `/api/graphql`. Instagram is mid-move, and Sort Feed handles both. Stash's `classifyUrl` regex `/^\/(api\/)?graphql/` already does; keep it that way.
 - **Exact post dates for Reels:** when a post has no `taken_at`, decode it from the media ID: `ms = (BigInt(pk) >> 23n) + 1314220021721n`. Sort Feed checked this to the second. Use it for `postedAt` only. `savedAt` stays Instagram's saved order.
 - **Keep Stash's slower pace.** Stash pages at 2.5 to 4.5 s per request, against Sort Feed's 0.7 to 1.5 s. Sort Feed stops at the first 429, and so does Stash. There's no reason to speed up.
 
-## 3. New: sort saved Instagram posts by how they performed (medium)
+## 3. New: sort saved Instagram posts by how they performed (done in v1.7.0)
 
 This is Sort Feed's core idea, applied to your own saves and done entirely locally.
 

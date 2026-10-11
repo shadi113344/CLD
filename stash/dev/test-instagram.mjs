@@ -118,6 +118,17 @@ async function card(page) {
     .catch(() => null);
 }
 
+async function clickCardButton(page, label) {
+  const ok = await page.evaluate((label) => {
+    for (const el of document.querySelectorAll('div')) {
+      const b = [...(el.shadowRoot?.querySelectorAll('.prog .btns button') || [])].find((x) => x.textContent === label);
+      if (b) return b.click(), true;
+    }
+    return false;
+  }, label);
+  if (!ok) throw new Error('no card button ' + label);
+}
+
 async function waitFinished(before, timeout = 150000) {
   const t0 = Date.now();
   while (finishedCount <= before) {
@@ -255,6 +266,14 @@ async function profileA() {
     if (!ok) wrong.push({ p, b });
   }
   check(wrong.length === 0, 'every post has the right link, type, caption, author and date', wrong.slice(0, 2));
+  const badCounts = [];
+  for (const p of fakeState.posts) {
+    const m = byId.get('instagram:' + p.code)?.metrics;
+    const video = p.kind === 'reel' || p.kind === 'video';
+    const hidden = fake.hidesLikes(p.n);
+    if (!(m && m.likes === (hidden ? null : 100 + p.n) && Boolean(m.likesHidden) === hidden && m.comments === p.n % 13 && m.views === (video ? fake.playCount(p.n) : null) && m.at > 0)) badCounts.push({ n: p.n, m });
+  }
+  check(badCounts.length === 0, 'likes, comments and views are kept with each post; hidden like counts stay empty', badCounts.slice(0, 3));
   const order = [...d.bms].sort((a, b) => b.savedAt - a.savedAt).map((b) => b.id.slice(10));
   check(JSON.stringify(order) === JSON.stringify(fakeState.posts.map((p) => p.code)), 'Stash keeps Instagram’s saved order (newest saved first)');
   const igCols = d.cols.filter((x) => x.igId);
@@ -322,7 +341,44 @@ async function profileA() {
   });
   check(/Recipes 🍕, Travel|Travel, Recipes 🍕/.test(csv), 'CSV export lists both collections for a post in two');
 
-  console.log('\nA4. “Sync Instagram now” picks up new saves and old posts newly filed into a collection');
+  console.log('\nA3b. Sort saved posts by views, likes or comments');
+  await t.lib.goto(`chrome-extension://${t.id}/src/ui/library.html#s/instagram`);
+  await t.lib.reload();
+  await t.lib.waitForSelector('.card');
+  const sorts = await t.lib.$$eval('#sort option', (os) => os.map((o) => o.value));
+  check(['views', 'likes', 'comments'].every((v) => sorts.includes(v)), 'the Instagram view offers Most viewed, Most liked and Most commented', sorts);
+  const topCards = () => t.lib.evaluate(() => [...document.querySelectorAll('.card')].slice(0, 3).map((c) => ({ id: c.dataset.id, counts: c.querySelector('.metrics')?.textContent || '' })));
+  await t.lib.selectOption('#sort', 'views');
+  let top = await topCards();
+  const byViews = fakeState.posts.filter((p) => p.kind === 'reel' || p.kind === 'video').sort((a, b) => fake.playCount(b.n) - fake.playCount(a.n));
+  check(JSON.stringify(top.map((x) => x.id)) === JSON.stringify(byViews.slice(0, 3).map((p) => 'instagram:' + p.code)), 'Most viewed puts the most-played Reels and videos first', top);
+  check(/views · \S+ likes · \S+ comments?/.test(top[0].counts), `cards show the counts (“${top[0].counts}”)`, top[0]);
+  await t.lib.screenshot({ path: path.join(OUT, 'library-most-viewed.png') });
+  check(fake.hidesLikes(byViews[1].n) && /views/.test(top[1].counts) && !/likes/.test(top[1].counts), 'a creator’s hidden like count isn’t shown as a number', top[1]);
+  await t.lib.selectOption('#sort', 'likes');
+  top = await topCards();
+  const byLikes = fakeState.posts.filter((p) => !fake.hidesLikes(p.n)).sort((a, b) => b.n - a.n);
+  check(top[0].id === 'instagram:' + byLikes[0].code, 'Most liked puts the most-liked post first', top);
+  await t.lib.selectOption('#sort', 'comments');
+  top = await topCards();
+  check(top.every((x) => /12 comments/.test(x.counts)), 'Most commented puts posts with the most comments first', top);
+  await t.lib.selectOption('#sort', 'saved');
+  await t.lib.goto(`chrome-extension://${t.id}/src/ui/library.html#s/x`);
+  check(!(await t.lib.$$eval('#sort option', (os) => os.map((o) => o.value))).includes('views'), 'views with no counts don’t offer count sorts');
+  const exported = await t.lib.evaluate(async () => {
+    const db = await import('/src/lib/db.js');
+    const { exportList } = await import('/src/lib/export.js');
+    const all = (await db.allBookmarks()).filter((b) => b.source === 'instagram');
+    return { csv: await exportList(all, 'csv', 't', []).blob.text(), json: JSON.parse(await exportList(all, 'json', 't', []).blob.text()) };
+  });
+  const reel = byViews[0];
+  const head = exported.csv.replace(/^\ufeff/, '').split('\r\n')[0];
+  const row = exported.csv.split('\r\n').find((l) => l.includes(reel.code)) || '';
+  check(head.startsWith('title,url,source,author,saved,posted,views,likes,comments,') && row.includes(`,${fake.playCount(reel.n)},${100 + reel.n},${reel.n % 13},`), 'CSV export has views, likes and comments columns', [head, row.slice(0, 200)]);
+  const j = exported.json.find((x) => x.url.includes(reel.code));
+  check(j?.views === fake.playCount(reel.n) && j.likes === 100 + reel.n && j.comments === reel.n % 13 && /^\d{4}-\d\d-\d\d$/.test(j.countsAsOf), 'JSON export has the counts and their date', j);
+
+  console.log('\nA4. “Sync Instagram now” picks up new saves; collections wait until Stash has seen how Instagram loads one');
   await admin('/save', { count: 2 });
   const travelNew = (await admin('/save', { count: 1, collection: '17890000000000002' })).added[0];
   const old = fakeState.posts.find((p) => p.n === 101).code;
@@ -334,14 +390,37 @@ async function profileA() {
   await waitFinished(before);
   c = await card(t.ig);
   check(/up to date/i.test(c?.title || ''), 'card says up to date', c);
+  check(/3 collections weren’t synced/.test(c?.detail || '') && /Open one collection on Instagram once/.test(c?.detail || '') && c.buttons.includes('Open Recipes 🍕'), 'card asks you to open one collection once, with a button for it', c);
+  check(!/logged/.test(c?.detail || ''), 'and doesn’t say you’re logged out', c?.detail);
   d = await dump(t.lib);
   check(d.bms.length === 133, '3 new posts saved (133 total)', d.bms.length);
   const top3 = [...d.bms].sort((a, b) => b.savedAt - a.savedAt).slice(0, 3).map((b) => b.id.slice(10));
   check(top3[0] === travelNew, 'the newest save sorts first', top3);
-  check(members(d, 'Travel').some((b) => b.id === 'instagram:' + travelNew), 'the new post saved into Travel is in Travel');
-  check(members(d, 'Recipes 🍕').some((b) => b.id === 'instagram:' + old), 'an old post (page 6 of Saved) newly filed into Recipes is now in Recipes');
+  check(members(d, 'Travel').some((b) => b.id === 'instagram:' + travelNew), 'the new post saved into Travel is in Travel (Saved says which collections it’s in)');
+  check(!d.st.igCooldownUntil && d.st.igCollectionsPending === true, 'no pause; collections marked as waiting', [d.st.igCooldownUntil, d.st.igCollectionsPending]);
   reqs = (await extRequests()).filter((r) => r.path.startsWith('/api/'));
+  const retired = reqs.filter((r) => r.path.startsWith('/api/v1/feed/collection/'));
+  check(retired.length === 1 && retired[0].status === 404, 'one request to the retired collection address (404), not one per collection', retired.map((r) => r.path + ' ' + r.status));
   check(reqs.length <= 8, `an incremental sync is cheap (${reqs.length} requests)`, reqs.map((r) => r.path + r.query));
+
+  console.log('\nA4b. Opening a collection teaches Stash Instagram’s request, and the collections sync');
+  await admin('/clear-log');
+  before = finishedCount;
+  await clickCardButton(t.ig, 'Open Recipes 🍕');
+  await waitFinished(before);
+  c = await card(t.ig);
+  d = await dump(t.lib);
+  check(/up to date/i.test(c?.title || '') && !/Open one collection/.test(c?.detail || ''), 'a sync starts right away (no hour’s wait) and finishes without asking again', c);
+  check(members(d, 'Recipes 🍕').some((b) => b.id === 'instagram:' + old), 'an old post (page 6 of Saved) newly filed into Recipes is now in Recipes');
+  const q = d.st.igCollectionQuery;
+  check(q?.docId === fake.COLLECTION_DOC && q.friendly === 'PolarisSavedCollectionPageWWWQuery' && q.path === '/api/graphql' && q.idPath.join('.') === 'collection_id' && q.cursorPath.join('.') === 'after' && !q.stale, 'learnt the request: doc_id, query name, where the id and cursor go', q);
+  check(!/NAcM|AVqFak3|Fak3Csrf/.test(JSON.stringify(d.st)), 'no session tokens kept');
+  reqs = await extRequests();
+  const gqlA = reqs.filter((r) => r.path === '/api/graphql');
+  check(gqlA.length === 3 && gqlA.every((r) => r.status === 200 && !r.bad) && new Set(gqlA.map((r) => r.vars.collection_id)).size === 3, `each collection asked for over GraphQL with the page’s tokens (${gqlA.length} requests)`, gqlA.map((r) => [r.status, r.bad, r.vars?.collection_id]));
+  check(!reqs.some((r) => r.path.startsWith('/api/v1/feed/collection/')), 'and the retired address isn’t asked again');
+  check(logLines.some((l) => /collection Travel: up to date \(via GraphQL\)/.test(l)), 'console says which way each collection was synced');
+  check(d.st.igCollectionsPending === false, 'collections no longer waiting');
 
   console.log('\nA5. Full rescan updates collection membership');
   const unfiled = fakeState.posts.find((p) => p.n === 0).code;
@@ -457,7 +536,7 @@ async function profileA() {
 async function profileB() {
   console.log('\nB. Import first, then live sync (Instagram without collection ids on posts)');
   await admin('/reset');
-  await admin('/scenario', { collectionIds: false });
+  await admin('/scenario', { collectionIds: false, restCollections: true }); // an account still on the old web app
   const fakeState = await admin('/state');
   const t = await launch('B');
 
@@ -507,6 +586,7 @@ async function profileB() {
   check(filled.every((b) => !b.title.startsWith('@') && b.savedAtExact), 'captions and names filled in; export’s saved times kept');
   const reqs = (await extRequests()).filter((r) => r.path.startsWith('/api/'));
   check(reqs.some((r) => r.path.startsWith('/api/v1/feed/collection/')), 'Stash paged each collection', reqs.map((r) => r.path));
+  check(logLines.some((l) => /collection Recipes 🍕: complete \(via REST\)/.test(l)), 'through the old address, since it still works here');
   await t.ctx.close();
 }
 
@@ -524,6 +604,113 @@ async function profileC() {
   check(d.bms.length === 130, 'all 130 posts captured from what Instagram’s page loaded', d.bms.length);
   check(/reached the end/i.test(c?.title || ''), 'card says reached the end', c);
   check(logLines.some((l) => /switching to scrolling|direct paging failed/.test(l)), 'console shows the switch to scrolling');
+  const posts = (await admin('/state')).posts;
+  const reels = posts.filter((p) => p.kind === 'reel').map((p) => [p, d.bms.find((b) => b.id === 'instagram:' + p.code)]);
+  check(reels.length > 20 && reels.every(([p, b]) => b?.postedAt === (1700000000 - p.n * 86400) * 1000), 'Reels sent without a date get their exact date from the media id', reels.slice(0, 2).map(([p, b]) => [p.n, b?.postedAt]));
+  await t.ctx.close();
+}
+
+async function profileD() {
+  console.log('\nD. The new Instagram: collections only over GraphQL, no collection ids on posts, “for (;;);” answers');
+  await admin('/reset');
+  await admin('/scenario', { collectionIds: false, gqlPrefix: true, gqlWrap: true, collectionVia: 'fetch' });
+  const fakeState = await admin('/state');
+  const t = await launch('D');
+
+  console.log('\nD1. A full sync saves all of Saved, and says the collections need one visit');
+  await admin('/clear-log');
+  let before = finishedCount;
+  await t.ig.goto('https://www.instagram.com/testuser/saved/');
+  await waitFinished(before);
+  let c = await card(t.ig);
+  let d = await dump(t.lib);
+  check(d.bms.length === 130, 'all 130 saved posts', d.bms.length);
+  check(/reached the end/i.test(c?.title || '') && /3 collections weren’t synced/.test(c?.detail || '') && c.buttons.includes('Open Recipes 🍕'), 'card: reached the end, and 3 collections need you to open one once', c);
+  check(!/logged/.test(c?.detail || '') && !d.st.igCooldownUntil, 'not mistaken for a logout, no pause', [c?.detail, d.st.igCooldownUntil]);
+  let reqs = await extRequests();
+  const retired = reqs.filter((r) => r.path.startsWith('/api/v1/feed/collection/'));
+  check(retired.length === 1 && retired[0].status === 404, 'one request to the retired collection address (a 404 page), then no more', retired.map((r) => r.path + ' ' + r.status));
+  check(members(d, 'Recipes 🍕')?.length === 0 && d.st.igCollectionsPending === true, 'collections are mirrored but still empty, and marked as waiting');
+
+  console.log('\nD2. Opening one collection teaches Stash the request; every collection syncs over GraphQL');
+  await admin('/clear-log');
+  before = finishedCount;
+  await clickCardButton(t.ig, 'Open Recipes 🍕');
+  await waitFinished(before);
+  c = await card(t.ig);
+  d = await dump(t.lib);
+  check(/up to date/i.test(c?.title || '') && !/weren’t synced/.test(c?.detail || ''), 'sync starts by itself and finishes', c);
+  check(members(d, 'Recipes 🍕')?.length === 26 && members(d, 'Travel')?.length === 12 && members(d, 'Empty one')?.length === 0, 'memberships match Instagram (26 / 12 / 0)', [members(d, 'Recipes 🍕')?.length, members(d, 'Travel')?.length]);
+  check(d.bms.filter((b) => (b.igCollections || []).length === 2).length === 3, 'posts in two collections are in both');
+  check(d.bms.length === 130, 'no stray posts', d.bms.length);
+  reqs = await extRequests();
+  const gql = reqs.filter((r) => r.path === '/api/graphql');
+  // Recipes: 3 pages (12 + 12 + 2), Travel: 1, Empty one: 1. Each collection's first pass goes to the end.
+  check(gql.length === 5 && gql.every((r) => r.status === 200 && !r.bad && r.doc === 'PolarisSavedCollectionPageWWWQuery'), `5 GraphQL pages, all accepted with the page’s tokens (${gql.length})`, gql.map((r) => [r.status, r.bad, r.vars?.collection_id]));
+  check(gql.filter((r) => r.vars.collection_id === '17890000000000001').map((r) => r.vars.after === null).join() === 'true,false,false', 'paged with Instagram’s cursor', gql.map((r) => r.vars));
+  const g = gaps(reqs.filter((r) => r.path.startsWith('/api/')));
+  check(Math.min(...g) >= 2400, `still paced (shortest gap ${Math.min(...g)} ms)`);
+  check(logLines.some((l) => /learnt Instagram’s collection request/.test(l)), 'learnt from a fetch() request whose answers start with “for (;;);”');
+  check(d.st.igCollectionQuery?.docId === fake.COLLECTION_DOC, 'request kept for next time');
+
+  console.log('\nD3. Instagram says “slow down” during collections: Stash stops at once');
+  let { apiCount } = await admin('/log');
+  await admin('/scenario', { rateLimitAfter: apiCount + 2 }); // the 3rd request: list, Saved page 1, then the first collection
+  await admin('/clear-log');
+  before = finishedCount;
+  await t.lib.evaluate(() => chrome.runtime.sendMessage({ type: 'instagramSync', full: false }));
+  await waitFinished(before);
+  c = await card(t.ig);
+  d = await dump(t.lib);
+  reqs = (await extRequests()).filter((r) => r.path.startsWith('/api/'));
+  check(/paused/i.test(c?.title || '') && /slow down/.test(c?.detail || ''), 'card says paused because Instagram asked to slow down', c);
+  check(reqs.length === 3 && reqs[2].path === '/api/graphql' && reqs[2].status === 429, 'no request after the 429', reqs.map((r) => r.path + ' ' + r.status));
+  const hours = (d.st.igCooldownUntil - Date.now()) / 3600000;
+  check(hours > 5.9 && hours <= 6, `paused for 6 hours (${hours.toFixed(2)})`);
+
+  console.log('\nD4. Instagram changes the request (new doc_id): Stash notices, asks for one visit, relearns');
+  await admin('/scenario', { rateLimitAfter: null, collectionDocId: '9145367822199999', collectionVia: 'xhr', gqlWrap: false, gqlPrefix: false });
+  await t.lib.evaluate(() => chrome.storage.local.remove('igCooldownUntil'));
+  const filed = fakeState.posts.find((p) => p.n === 78).code; // not in Travel yet
+  await admin('/file', { collection: '17890000000000002', code: filed });
+  await admin('/clear-log');
+  before = finishedCount;
+  await t.lib.evaluate(() => chrome.runtime.sendMessage({ type: 'instagramSync', full: false }));
+  await waitFinished(before);
+  c = await card(t.ig);
+  d = await dump(t.lib);
+  check(/Open one collection on Instagram once/.test(c?.detail || '') && !/logged/.test(c?.detail || '') && !d.st.igCooldownUntil, 'card asks for one visit again; no logout, no pause', c);
+  check(d.st.igCollectionQuery?.stale === true, 'the old request is marked as no longer working');
+  reqs = (await extRequests()).filter((r) => r.path.startsWith('/api/'));
+  check(reqs.filter((r) => r.path === '/api/graphql').length === 1 && reqs.filter((r) => r.path.startsWith('/api/v1/feed/collection/')).length === 1, 'one GraphQL try, one try of the old address, then it stops asking', reqs.map((r) => r.path + ' ' + r.status));
+  await admin('/clear-log');
+  before = finishedCount;
+  await clickCardButton(t.ig, 'Open Recipes 🍕');
+  await waitFinished(before);
+  d = await dump(t.lib);
+  check(d.st.igCollectionQuery?.docId === '9145367822199999' && !d.st.igCollectionQuery.stale, 'relearnt the new doc_id from an XHR request');
+  check(members(d, 'Travel').some((b) => b.id === 'instagram:' + filed) && members(d, 'Travel').length === 13, 'a post filed into Travel since then is in Travel');
+  check(logLines.some((l) => /collection request changed/.test(l)), 'console notes that the request changed');
+
+  console.log('\nD5. The collections list address moves: Stash finds collections in Instagram’s own data');
+  await admin('/scenario', { restCollectionsList: false });
+  const design = fakeState.posts.filter((p) => p.n % 13 === 0).map((p) => p.code);
+  await admin('/collection', { name: 'Design ✏️', codes: design });
+  await t.ig.goto('https://www.instagram.com/testuser/saved/');
+  await waitFor(async () => (await dump(t.lib)).cols.some((x) => x.name === 'Design ✏️' && x.igId), 20000, 'Design ✏️ mirrored');
+  check(true, 'a new collection named only in Instagram’s data appears in Stash');
+  // Sync from All posts, where the app makes no GraphQL request: Stash reads the tokens from the page itself.
+  await t.ig.goto('https://www.instagram.com/testuser/saved/all-posts/');
+  await sleep(6000);
+  await admin('/clear-log');
+  before = finishedCount;
+  await t.lib.evaluate(() => chrome.runtime.sendMessage({ type: 'instagramSync', full: false }));
+  await waitFinished(before);
+  d = await dump(t.lib);
+  check(members(d, 'Design ✏️')?.length === design.length, `and its ${design.length} posts sync, though the list address is gone`, members(d, 'Design ✏️')?.length);
+  reqs = (await extRequests()).filter((r) => r.path === '/api/graphql');
+  check(reqs.length >= 4 && reqs.every((r) => r.status === 200 && !r.bad), 'from a page with no GraphQL request of its own, using the tokens in the page', reqs.map((r) => [r.status, r.bad]));
+  check(logLines.some((l) => /using the 4 collections Stash already knows/.test(l)), 'console says it used the collections it knows');
   await t.ctx.close();
 }
 
@@ -531,7 +718,7 @@ async function profileC() {
 
 const srv = await fake.start();
 try {
-  for (const [name, fn] of [['A', profileA], ['B', profileB], ['C', profileC]]) {
+  for (const [name, fn] of [['A', profileA], ['B', profileB], ['C', profileC], ['D', profileD]]) {
     if (only && !only.has(name)) continue;
     try {
       await fn();

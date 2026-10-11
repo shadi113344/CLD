@@ -89,6 +89,9 @@ function toMarkdown(b, collectionNames, image) {
     collectionNames.length > 1 ? `collections: [${collectionNames.map(yamlStr).join(', ')}]` : null,
     `saved: ${new Date(b.savedAt).toISOString().slice(0, 10)}`,
     b.postedAt ? `posted: ${new Date(b.postedAt).toISOString().slice(0, 10)}` : null,
+    b.metrics?.views != null ? `views: ${b.metrics.views}` : null,
+    b.metrics?.likes != null ? `likes: ${b.metrics.likes}` : null,
+    b.metrics?.comments != null ? `comments: ${b.metrics.comments}` : null,
     `tags: [${tags.map(yamlStr).join(', ')}]`,
     '---',
   ].filter(Boolean);
@@ -229,6 +232,8 @@ function rows(list, collections) {
       .join(', '),
     note: b.note || '',
     text: b.text || '',
+    // Instagram's counts as of the last sync (null: not shown, e.g. hidden likes).
+    ...(b.metrics ? { views: b.metrics.views ?? null, likes: b.metrics.likes ?? null, comments: b.metrics.comments ?? null, countsAsOf: day(b.metrics.at) } : {}),
   }));
 }
 
@@ -281,7 +286,8 @@ export function exportList(list, format, title, collections) {
         ),
       };
     case 'csv': {
-      const cols = ['title', 'url', 'source', 'author', 'saved', 'posted', 'tags', 'collection', 'note', 'text'];
+      const counts = r.some((x) => 'countsAsOf' in x) ? ['views', 'likes', 'comments'] : [];
+      const cols = ['title', 'url', 'source', 'author', 'saved', 'posted', ...counts, 'tags', 'collection', 'note', 'text'];
       const text = [cols.join(','), ...r.map((x) => cols.map((c) => csvCell(x[c])).join(','))].join('\r\n');
       return { ext: 'csv', blob: blob('﻿' + text, 'text/csv') }; // BOM so Excel reads UTF-8
     }

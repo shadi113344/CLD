@@ -367,6 +367,10 @@ const handlers = {
     broadcast({ type: 'changed' });
     return map;
   },
+  // Mirrored collections with a real Instagram id, for when Instagram's list request fails.
+  async igKnownCollections() {
+    return (await db.allCollections()).filter((c) => /^\d{5,}$/.test(c.igId || '')).map((c) => ({ igId: c.igId, name: c.igName || c.name }));
+  },
   async igCollectionFinalize({ igId, keepIds }) {
     const removed = await db.finalizeIgCollection(igId, keepIds);
     if (removed) broadcast({ type: 'changed' });

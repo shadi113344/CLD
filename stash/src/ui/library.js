@@ -8,6 +8,9 @@ const PANEL = location.pathname.endsWith('panel.html');
 const PAGE = 150;
 const SOURCES = { x: 'X', reddit: 'Reddit', linkedin: 'LinkedIn', instagram: 'Instagram', web: 'Web' };
 const MEDIA = { reel: 'Reel', video: 'Video', carousel: 'Carousel' };
+// Sorts by the counts Instagram reported at the last sync (bookmark.metrics).
+const METRIC_SORTS = { views: 'Most viewed', likes: 'Most liked', comments: 'Most commented' };
+const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
 const state = {
   settings: DEFAULTS,
@@ -362,11 +365,19 @@ function baseList() {
   return list;
 }
 
+// Which count sorts make sense for this list: only counts some item has.
+function metricSorts(list) {
+  return Object.keys(METRIC_SORTS).filter((k) => list.some((b) => b.metrics?.[k] != null));
+}
+
 function currentList() {
   let list = baseList();
+  const metric = METRIC_SORTS[state.sort] && metricSorts(list).includes(state.sort) ? state.sort : null;
   if (state.query.trim()) list = rank(list, state.query, state.queryVec);
   else if (state.sort === 'posted') list = [...list].sort((a, b) => (b.postedAt || b.savedAt) - (a.postedAt || a.savedAt));
   else if (state.sort === 'oldest') list = [...list].sort((a, b) => a.savedAt - b.savedAt);
+  // Posts without the count go last, in saved order.
+  else if (metric) list = [...list].sort((a, b) => (b.metrics?.[metric] ?? -1) - (a.metrics?.[metric] ?? -1) || b.savedAt - a.savedAt);
   return list;
 }
 
@@ -402,7 +413,7 @@ function renderList() {
       <span>${state.query ? `${list.length} match${list.length === 1 ? '' : 'es'}` : `${list.length} item${list.length === 1 ? '' : 's'}`}</span>
       <span class="grow"></span>${syncBtn}
       <select id="exportFmt" aria-label="Export this list" title="Export the links in this view"><option value="">Export ${list.length}…</option>${Object.entries(LIST_FORMATS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
-      ${state.query ? '' : `<select id="sort" aria-label="Sort"><option value="saved">Newest saved</option><option value="oldest">Oldest saved</option><option value="posted">Newest posted</option></select>`}
+      ${state.query ? '' : `<select id="sort" aria-label="Sort"><option value="saved">Newest saved</option><option value="oldest">Oldest saved</option><option value="posted">Newest posted</option>${metricSorts(baseList()).map((k) => `<option value="${k}">${METRIC_SORTS[k]}</option>`).join('')}</select>`}
     </div>`;
 
   if (!list.length) {
@@ -457,6 +468,7 @@ function bindToolbar() {
   const s = $('#sort');
   if (s) {
     s.value = state.sort;
+    if (s.value !== state.sort) s.value = 'saved'; // a count sort this list has no counts for
     s.onchange = () => {
       state.sort = s.value;
       renderList();
@@ -513,6 +525,7 @@ function card(b, i) {
       ${MEDIA[b.mediaType] ? `<span class="kind">${MEDIA[b.mediaType]}</span>` : ''}
       ${b.author ? `<span>${esc(b.author)}</span>` : `<span>${esc(host(b.url))}</span>`}
       <span title="${esc(new Date(b.savedAt).toLocaleString())}">saved ${ago(b.savedAt)}</span>
+      ${metricsLine(b)}
       ${colls.map((c) => `<span class="chip coll" data-act="goto-coll" data-cid="${esc(c.id)}">${esc(c.name)}</span>`).join('')}
     </div>
     <h3><a href="${esc(safeUrl(b.url))}" target="_blank" rel="noopener">${esc(b.title || b.url)}</a></h3>
@@ -527,10 +540,24 @@ function card(b, i) {
   </article>`;
 }
 
+// "12K views · 1.4K likes · 120 comments", as of the last sync.
+function metricsLine(b) {
+  const m = b.metrics;
+  if (!m) return '';
+  const parts = [
+    m.views != null && `${compact.format(m.views)} views`,
+    m.likes != null && `${compact.format(m.likes)} like${m.likes === 1 ? '' : 's'}`,
+    m.comments != null && `${compact.format(m.comments)} comment${m.comments === 1 ? '' : 's'}`,
+  ].filter(Boolean);
+  if (!parts.length) return '';
+  return `<span class="metrics" title="${esc(`Instagram’s counts as of ${new Date(m.at).toLocaleString()}`)}">${esc(parts.join(' · '))}</span>`;
+}
+
 function extra(b) {
   const related = relatedTo(b, 5);
   return `<div class="extra">
     ${thumbImg(b, 'big')}
+    ${b.metrics?.at ? `<div class="hint">Counts as of ${esc(new Date(b.metrics.at).toLocaleString())}, from your last Instagram sync${b.metrics.likesHidden ? '. The creator hides like counts' : ''}.</div>` : ''}
     <label class="hint">Note<textarea data-act="note" placeholder="Why did you save this?">${esc(b.note)}</textarea></label>
     <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <select data-act="set-coll" aria-label="Collection"><option value="">${b.igCollections?.length ? 'No other collection' : 'No collection'}</option>

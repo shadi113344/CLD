@@ -5,6 +5,11 @@
 //    few seconds, stopping at the first sign Instagram is unhappy.
 // The first sync goes to your oldest saved post; later ones stop once they
 // reach posts Stash already has. Automatic syncs run at most once an hour.
+//
+// Each collection is paged through Instagram's GraphQL request when Stash has
+// learnt it (from the page, the first time you open a collection), else the
+// old /api/v1 address. When neither works the card asks you to open one
+// collection once; Stash then learns the request and syncs them.
 (() => {
   const P = () => window.__stashProgress;
   const log = (...a) => console.info('[Stash]', ...a);
@@ -18,8 +23,11 @@
     '/api/v1/collections/list/?collection_types=%5B%22ALL_MEDIA_AUTO_COLLECTION%22%2C%22MEDIA%22%2C%22AUDIO_AUTO_COLLECTION%22%5D&include_public_only=0&get_cover_media_lists=false';
   const collectionFeed = (igId) => `/api/v1/feed/collection/${igId}/posts/`;
   const savedPage = () => /^\/[A-Za-z0-9._]{1,30}\/saved(\/|$)/.test(location.pathname);
+  const slug = (name) => String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'collection';
 
-  const run = { active: false, mode: 'new', added: 0, checked: new Set(), newIds: new Set(), collections: 0, requests: 0, lastBatch: 0, label: '' };
+  const run = { active: false, mode: 'new', added: 0, checked: new Set(), newIds: new Set(), collections: 0, requests: 0, lastBatch: 0, label: '', unsynced: [] };
+  // Instagram's collection request, learnt on this page load (also kept in chrome.storage.local).
+  let learnt = null;
   // What Instagram loaded before a sync started still counts toward it.
   const passive = { added: 0, seen: new Set(), newIds: new Set() };
 
@@ -56,7 +64,8 @@
     if (e.source !== window) return;
     const d = e.data;
     if (d?.__stash === 'ig-fetch-result') return waiting.get(d.id)?.(d.result);
-    if (d?.__stash === 'ig-seen') return trigger(`Instagram loaded ${d.kind === 'collections' ? 'your collections' : 'saved posts'}`);
+    if (d?.__stash === 'ig-template') return learnTemplate(d.template).catch((err) => log('could not keep the collection request:', err.message));
+    if (d?.__stash === 'ig-seen') return trigger(`Instagram loaded ${d.kind === 'collections' ? 'your collections' : d.kind === 'collection' ? 'a collection' : 'saved posts'}`);
     if (d?.__stash === 'ig-collections' && d.passive) return mirror(d.list).catch((err) => log('could not mirror collections:', err.message));
     if (d?.__stash !== 'ig-items' || !d.passive) return;
     try {
@@ -73,8 +82,27 @@
     }
   });
 
+  // The collection request ig-main.js learnt from the page: keep it (never
+  // any tokens; ig-main.js leaves those out). If collections were waiting for
+  // it and an automatic sync was skipped on this page, start one now.
+  async function learnTemplate(t) {
+    if (!t || typeof t !== 'object' || typeof t.docId !== 'string') return;
+    learnt = { ...t, stale: false };
+    const { igCollectionQuery: old } = await chrome.storage.local.get('igCollectionQuery');
+    const same = old && !old.stale && JSON.stringify({ ...old, at: 0 }) === JSON.stringify({ ...learnt, at: 0 });
+    if (!same) {
+      await chrome.storage.local.set({ igCollectionQuery: learnt });
+      log(old ? 'Instagram’s collection request changed; Stash will use the new one' : 'learnt Instagram’s collection request', `(${t.friendly || 'doc ' + t.docId})`);
+    }
+    if (skippedFor === location.pathname && !run.active) {
+      triggeredFor = null;
+      skippedFor = null;
+      trigger('you opened a collection');
+    }
+  }
+
   let reqId = 0;
-  function igFetch(path) {
+  function ask(msg) {
     const id = ++reqId + ':' + Math.random().toString(36).slice(2);
     run.requests++;
     return new Promise((resolve) => {
@@ -85,9 +113,12 @@
         resolve(r || { error: 'no answer' });
       };
       waiting.set(id, done);
-      window.postMessage({ __stash: 'ig-fetch', id, path }, location.origin);
+      window.postMessage({ ...msg, id }, location.origin);
     });
   }
+  const igFetch = (path) => ask({ __stash: 'ig-fetch', path });
+  const igGql = (template, igId, cursor) => ask({ __stash: 'ig-gql', template, igId, cursor });
+  const withMaxId = (path, cursor) => path + (cursor ? `?max_id=${encodeURIComponent(cursor)}` : '');
 
   // Wait between requests, in short steps so Stop is instant.
   async function pace() {
@@ -132,8 +163,10 @@
   }
 
   // Page through one feed (Saved, or one collection) until the end, or, for a
-  // "new" sync, until a page brings nothing Stash didn't already have.
-  async function pageFeed(path, { igId = null, label }) {
+  // "new" sync, until a page brings nothing Stash didn't already have. A
+  // collection's first pass always goes to the end. fetchPage(cursor) asks
+  // Instagram for one page.
+  async function pageFeed(fetchPage, { igId = null, label, firstPass = false }) {
     let cursor = null;
     let page = 0;
     let retried = false;
@@ -144,7 +177,7 @@
       if (run.requests) await pace();
       if (!run.active) break;
       progress(`${label}: page ${page + 1}…`);
-      const r = await igFetch(path + (cursor ? `?max_id=${encodeURIComponent(cursor)}` : ''));
+      const r = await fetchPage(cursor);
       if (!run.active) break;
       if (r.pushback) return r;
       if (r.error) {
@@ -154,7 +187,7 @@
           await sleep(10000);
           continue;
         }
-        return r;
+        return { ...r, pages: page };
       }
       retried = false;
       page++;
@@ -167,7 +200,7 @@
       log(`${label} page ${page}: ${r.items.length} posts, ${res.added} new${igId ? `, ${res.linked} newly in this collection` : ''}`);
       progress(`${label}: page ${page}`);
       if (!r.more || !r.next || cursors.has(r.next)) return { complete: true, ids, sawCollectionIds };
-      if (run.mode === 'new') {
+      if (run.mode === 'new' && !firstPass) {
         const fresh = r.items.some((t) => run.newIds.has(t.id)) || (igId && res.linked > 0);
         if (!fresh) return { complete: false, ids, sawCollectionIds };
       }
@@ -177,16 +210,73 @@
     return { stopped: true };
   }
 
+  // Page one collection: through the learnt GraphQL request, else the old
+  // REST address. Returns null when neither works. A 404 or a web page here
+  // means "this address is gone", never "logged out", and doesn't stop the sync.
+  async function syncCollection(c, paths, firstPass) {
+    const opts = { igId: c.igId, label: c.name, firstPass };
+    if (paths.query) {
+      const r = await pageFeed((cursor) => igGql(paths.query, c.igId, cursor), opts);
+      if (r.pushback || r.stopped) return r;
+      if (!r.stale && !r.gone) return { ...r, via: 'GraphQL' };
+      log(`collection ${c.name}: Instagram’s collection request stopped working (${r.error})`);
+      paths.query = null;
+      learnt = null;
+      const { igCollectionQuery: q } = await chrome.storage.local.get('igCollectionQuery');
+      if (q) await chrome.storage.local.set({ igCollectionQuery: { ...q, stale: true } });
+    }
+    if (!paths.restGone) {
+      const r = await pageFeed((cursor) => igFetch(withMaxId(collectionFeed(c.igId), cursor)), opts);
+      if (r.pushback || r.stopped) return r;
+      if (!r.gone) return { ...r, via: 'REST' };
+      log(`collection ${c.name}: the old collection address is gone (${r.error})`);
+      paths.restGone = true;
+    }
+    return null;
+  }
+
+  async function syncCollections(list) {
+    const st = await chrome.storage.local.get(['igCollectionQuery', 'igCollectionsDone']);
+    const done = st.igCollectionsDone || {};
+    const stored = st.igCollectionQuery && !st.igCollectionQuery.stale ? st.igCollectionQuery : null;
+    const paths = { query: learnt || stored, restGone: false };
+    const unsynced = [];
+    for (const c of list) {
+      const r = await syncCollection(c, paths, !done[c.igId]);
+      if (r?.pushback || r?.stopped) return r;
+      if (!r) {
+        log(`collection ${c.name}: not synced; Stash needs to see Instagram load one collection first`);
+        unsynced.push(c);
+      } else if (r.error) log(`collection ${c.name} failed (via ${r.via}):`, r.error);
+      else {
+        log(`collection ${c.name}: ${r.complete ? 'complete' : 'up to date'} (via ${r.via})`);
+        if (r.complete) {
+          done[c.igId] = Date.now();
+          if (run.mode === 'all') await send({ type: 'igCollectionFinalize', igId: c.igId, keepIds: r.ids });
+        }
+      }
+    }
+    await chrome.storage.local.set({ igCollectionsDone: done, igCollectionsPending: unsynced.length > 0 });
+    return { unsynced };
+  }
+
   async function syncAll() {
     // 1. Your collections, so they exist in Stash before posts are filed into them.
     const cols = await fetchCollections();
     if (cols.pushback || !run.active) return cols.pushback ? cols : { stopped: true };
-    if (cols.list) {
-      run.collections = cols.list.length;
-      await mirror(cols.list);
+    let list = cols.list;
+    if (list) {
+      run.collections = list.length;
+      await mirror(list);
+    } else {
+      // The list request failed: use the collections Stash already knows
+      // (listed before, or named in Instagram's data on this or another visit).
+      list = await send({ type: 'igKnownCollections' }).catch(() => null);
+      if (list?.length) log(`using the ${list.length} collections Stash already knows`);
+      run.collections = list?.length || 0;
     }
     // 2. Everything you saved, newest first.
-    const main = await pageFeed(SAVED, { label: 'Saved' });
+    const main = await pageFeed((cursor) => igFetch(withMaxId(SAVED, cursor)), { label: 'Saved' });
     if (main.pushback || main.stopped) return main;
     if (main.error) {
       log('direct paging failed:', main.error);
@@ -196,12 +286,16 @@
     if (main.complete) await chrome.storage.local.set({ igFullSyncDone: true });
     // 3. Each collection. A full sync can skip this when Saved already said
     //    which collections each post is in.
-    if (cols.list?.length && !(run.mode === 'all' && main.sawCollectionIds)) {
-      for (const c of cols.list) {
-        const r = await pageFeed(collectionFeed(c.igId), { igId: c.igId, label: c.name });
+    if (list?.length) {
+      if (run.mode === 'all' && main.sawCollectionIds) {
+        const st = await chrome.storage.local.get('igCollectionsDone');
+        const done = st.igCollectionsDone || {};
+        list.forEach((c) => (done[c.igId] = Date.now()));
+        await chrome.storage.local.set({ igCollectionsDone: done, igCollectionsPending: false });
+      } else {
+        const r = await syncCollections(list);
         if (r.pushback || r.stopped) return r;
-        if (r.error) log(`collection ${c.name} failed:`, r.error);
-        else if (r.complete && run.mode === 'all') await send({ type: 'igCollectionFinalize', igId: c.igId, keepIds: r.ids });
+        run.unsynced = r.unsynced;
       }
     }
     return { done: main.complete ? 'Reached the end' : 'Up to date' };
@@ -248,6 +342,7 @@
       requests: 0,
       lastBatch: Date.now(),
       label: 'starting…',
+      unsynced: [],
     });
     Object.assign(passive, { added: 0, seen: new Set(), newIds: new Set() });
     finished = false;
@@ -308,6 +403,23 @@
       });
     }
     const why = o.stopped ? 'Stopped' : o.done;
+    const waitingCols = o.stopped ? [] : run.unsynced;
+    if (waitingCols.length) {
+      // Instagram's collection request hasn't been seen yet: one visit teaches it.
+      const n = waitingCols.length;
+      const first = waitingCols[0];
+      const user = location.pathname.match(/^\/([A-Za-z0-9._]{1,30})\/saved(\/|$)/)?.[1] || (await chrome.storage.local.get('igUsername')).igUsername;
+      return ui({
+        title: `Instagram sync: ${why.toLowerCase()}`,
+        detail: `${counts}. ${n} collection${n === 1 ? ' wasn’t' : 's weren’t'} synced: Instagram changed how collections load. Open one collection on Instagram once, and Stash will sync ${n === 1 ? 'it' : 'them'}.`,
+        value: 1,
+        actions: [
+          ...(user ? [{ label: `Open ${first.name}`, primary: true, onClick: () => location.assign(`/${user}/saved/${slug(first.name)}/${first.igId}/`) }] : []),
+          { label: 'Open in Stash', onClick: openStash },
+          { label: 'Done', primary: !user, onClick: () => P().hide() },
+        ],
+      });
+    }
     ui({
       title: `Instagram sync: ${why.toLowerCase()}`,
       detail: counts,
@@ -323,8 +435,8 @@
   // ---- when to sync ----
 
   async function state() {
-    const st = await chrome.storage.local.get(['settings', 'igFullSyncDone', 'igLastSync', 'igCooldownUntil']);
-    return { s: st.settings || {}, mode: st.igFullSyncDone ? 'new' : 'all', last: st.igLastSync || 0, cooldown: st.igCooldownUntil || 0 };
+    const st = await chrome.storage.local.get(['settings', 'igFullSyncDone', 'igLastSync', 'igCooldownUntil', 'igCollectionsPending']);
+    return { s: st.settings || {}, mode: st.igFullSyncDone ? 'new' : 'all', last: st.igLastSync || 0, cooldown: st.igCooldownUntil || 0, pending: Boolean(st.igCollectionsPending) };
   }
 
   function offerAfterCooldown(cooldown, mode) {
@@ -346,11 +458,12 @@
 
   // Start at most once per page view, as soon as Instagram loads something from Saved.
   let triggeredFor = null;
+  let skippedFor = null; // page where an automatic sync was skipped because the last one was recent
   async function trigger(why) {
     rememberUser();
     if (run.active || triggeredFor === location.pathname) return;
     triggeredFor = location.pathname;
-    const { s, mode, last, cooldown } = await state();
+    const { s, mode, last, cooldown, pending } = await state();
     if (s.captureInstagram === false) return log('Instagram capture is off in settings');
     if (cooldown > Date.now()) return offerAfterCooldown(cooldown, mode);
     if (s.igAutoSync === false) {
@@ -364,11 +477,15 @@
         ],
       });
     }
-    if (mode === 'new' && Date.now() - last < AUTO_EVERY) {
+    // Collections waiting for the request Instagram just showed: don't make you wait an hour.
+    const teaching = pending && Boolean(learnt);
+    if (mode === 'new' && Date.now() - last < AUTO_EVERY && !teaching) {
+      skippedFor = location.pathname;
       return log(`auto-sync skipped: last sync ${Math.round((Date.now() - last) / 60000)} min ago (saving what Instagram loads)`);
     }
-    log('auto-sync triggered:', why);
-    start(mode, why);
+    const reason = teaching ? `${why}; learnt Instagram’s collection request` : why;
+    log('auto-sync triggered:', reason);
+    start(mode, reason);
   }
 
   // "Sync Instagram now" in Stash.

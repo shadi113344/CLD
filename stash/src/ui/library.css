@@ -115,6 +115,7 @@ button:disabled { opacity: .5; cursor: default; }
 .src.linkedin { background: #0a66c2; color: #fff; }
 .src.instagram { background: #c13584; color: #fff; }
 .card .meta .kind { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+.card .meta .metrics { font-variant-numeric: tabular-nums; }
 .extra img.big { max-width: min(100%, 420px); border-radius: 8px; }
 nav a .ig { font-size: 9px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; margin-left: 4px; vertical-align: 1px; }
 .card h3 { margin: 2px 0; font-size: 15px; line-height: 1.35; grid-column: 1; }

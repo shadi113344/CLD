@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Stash",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "A private, local-first bookmark manager for the web, X, Reddit, LinkedIn and Instagram, with on-device AI search.",
   "minimum_chrome_version": "116",
   "icons": {

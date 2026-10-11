@@ -137,13 +137,17 @@ export async function upsertMany(items, stats = {}) {
       const contentChanged = next.text !== cur.text || next.title !== cur.title;
       // An export's real "saved on" time beats the estimate a live sync makes.
       const exact = item.savedAtExact && !cur.savedAtExact;
-      if (contentChanged || ig.changed || exact || (next.image !== cur.image && !cur.thumb)) stats.updated++;
+      // Likes, views and comments: the latest sync's numbers replace older ones.
+      const metrics = item.metrics && !fillOnly ? item.metrics : null;
+      const metricsChanged = metrics && ['likes', 'comments', 'views'].some((k) => metrics[k] !== cur.metrics?.[k]);
+      if (contentChanged || ig.changed || exact || metricsChanged || (next.image !== cur.image && !cur.thumb)) stats.updated++;
       s.put({
         ...cur,
         ...next,
         ...(item.mediaType && !(fillOnly && cur.mediaType) ? { mediaType: item.mediaType } : {}),
         ...(ig.list ? { igCollections: ig.list } : {}),
         ...(exact ? { savedAt: item.savedAt, savedAtExact: true } : {}),
+        ...(metrics ? { metrics } : {}),
         enriched: contentChanged ? 0 : cur.enriched,
         updatedAt: Date.now(),
       });
@@ -190,6 +194,7 @@ export function newBookmark(item) {
     ...(item.mediaType ? { mediaType: item.mediaType } : {}),
     ...(item.igCollections?.length ? { igCollections: item.igCollections } : {}),
     ...(item.savedAtExact ? { savedAtExact: true } : {}),
+    ...(item.metrics ? { metrics: item.metrics } : {}),
   };
 }
 
