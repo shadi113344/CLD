@@ -14,7 +14,7 @@ export function tokenize(s) {
 }
 
 export function bookmarkHaystack(b) {
-  return [b.title, b.text, b.author, b.authorHandle, b.note, b.url, ...(b.tags || []), ...(b.autoTags || [])].join(' ').toLowerCase();
+  return [b.title, b.text, b.author, b.authorHandle, b.mediaType, b.note, b.url, ...(b.tags || []), ...(b.autoTags || [])].join(' ').toLowerCase();
 }
 
 export function keywordScore(b, terms) {

@@ -2,10 +2,12 @@ import * as db from '../lib/db.js';
 import { getSettings, saveSettings, apiConfigured, DEFAULTS } from '../lib/settings.js';
 import { rank, cosine } from '../lib/search.js';
 import { exportJson, importJson, exportMarkdownZip, exportList, exportPeople, LIST_FORMATS } from '../lib/export.js';
+import { readInstagramExport } from '../lib/instagram-import.js';
 
 const PANEL = location.pathname.endsWith('panel.html');
 const PAGE = 150;
-const SOURCES = { x: 'X', reddit: 'Reddit', linkedin: 'LinkedIn', web: 'Web' };
+const SOURCES = { x: 'X', reddit: 'Reddit', linkedin: 'LinkedIn', instagram: 'Instagram', web: 'Web' };
+const MEDIA = { reel: 'Reel', video: 'Video', carousel: 'Carousel' };
 
 const state = {
   settings: DEFAULTS,
@@ -104,7 +106,14 @@ function applyLook() {
 // ---------- data ----------
 
 async function load() {
-  const [settings, bookmarks, collections, people] = await Promise.all([getSettings(), db.allBookmarks(), db.allCollections(), db.allPeople()]);
+  const [settings, bookmarks, collections, people, igState] = await Promise.all([
+    getSettings(),
+    db.allBookmarks(),
+    db.allCollections(),
+    db.allPeople(),
+    chrome.storage.local.get(['igLastSync', 'igCooldownUntil']),
+  ]);
+  state.igState = igState;
   state.people = people;
   state.settings = settings;
   state.bookmarks = bookmarks;
@@ -189,7 +198,7 @@ function renderNav() {
     `<h4>Sources</h4>`,
     ...Object.entries(SOURCES).map(([k, v]) => link('#s/' + k, v, count((b) => b.source === k))),
     `<h4>Collections <button id="newColl" title="New collection" aria-label="New collection">+</button></h4>`,
-    ...collections.map((c) => link('#c/' + c.id, esc(c.name), count((b) => b.collectionId === c.id))),
+    ...collections.map((c) => link('#c/' + c.id, esc(c.name) + (c.igId ? ' <span class="ig" title="Mirrors an Instagram collection">IG</span>' : ''), count((b) => db.inCollection(b, c)))),
     collections.length ? '' : `<a href="#" id="newColl2" class="n"><span class="n">+ New collection</span></a>`,
     ...peopleNav(link),
     topTags.length ? `<h4>Tags</h4>` : '',
@@ -345,7 +354,10 @@ function baseList() {
   const { view: v, arg } = state.route;
   let list = state.bookmarks;
   if (v === 's') list = list.filter((b) => b.source === arg);
-  if (v === 'c') list = list.filter((b) => b.collectionId === arg);
+  if (v === 'c') {
+    const c = state.collections.find((x) => x.id === arg);
+    list = c ? list.filter((b) => db.inCollection(b, c)) : [];
+  }
   if (v === 't') list = list.filter((b) => allTags(b).includes(arg));
   return list;
 }
@@ -379,7 +391,9 @@ function renderList() {
         ? `<button class="ghost" data-act="reddit-sync">Sync Reddit now</button>`
         : v === 's' && arg === 'linkedin'
           ? `<button class="ghost" data-act="open-url" data-url="https://www.linkedin.com/my-items/saved-posts/">Open LinkedIn saved posts to sync</button>`
-          : v === 'c'
+          : v === 's' && arg === 'instagram'
+            ? `<button class="ghost" data-act="ig-sync">Sync Instagram now</button><button class="ghost" data-act="ig-import">Import Instagram export…</button>`
+            : v === 'c'
             ? `<button class="ghost" data-act="rename-coll">Rename</button><button class="ghost" data-act="delete-coll">Delete collection</button>`
             : '';
 
@@ -401,6 +415,7 @@ function renderList() {
     `<div class="list">${state.visible.map((b, i) => card(b, i)).join('')}</div>` +
     (list.length > state.limit ? `<button class="ghost more" data-act="more">Show more (${list.length - state.limit} left)</button>` : '');
   bindToolbar();
+  hydrateThumbs();
 }
 
 function slugName(s) {
@@ -455,13 +470,38 @@ function emptyState() {
   return `<div class="empty">
     <h2>Your stash is empty</h2>
     <p>Press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> on any page (or click the toolbar icon) to save it.</p>
-    <p>Visit your <a href="https://x.com/i/bookmarks#stash-sync" target="_blank">X bookmarks</a>, <a href="https://www.reddit.com/" target="_blank">Reddit</a>, or
-    <a href="https://www.linkedin.com/my-items/saved-posts/" target="_blank">LinkedIn saved posts</a> and scroll — they’re captured automatically.</p>
+    <p>Visit your <a href="https://x.com/i/bookmarks#stash-sync" target="_blank">X bookmarks</a>, <a href="https://www.reddit.com/" target="_blank">Reddit</a>,
+    <a href="https://www.linkedin.com/my-items/saved-posts/" target="_blank">LinkedIn saved posts</a> or your Instagram Saved, and they’re captured automatically.</p>
+    <p>Have Instagram’s data download? <a href="#" data-act="ig-import">Import your saved posts from it</a>.</p>
     <p>Have a backup? <a href="#" data-act="import">Import JSON</a>.</p></div>`;
 }
 
+// Instagram images are shown only from local copies: Instagram's own links
+// expire, and its image servers refuse to show them on other sites anyway.
+function thumbImg(b, cls) {
+  if (b.source === 'instagram') return b.thumb ? `<img class="${cls}" data-thumb="${esc(b.id)}" alt="" hidden>` : '';
+  return b.image ? `<img class="${cls}" src="${esc(safeUrl(b.image))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '';
+}
+
+const thumbUrls = new Map(); // bookmark id -> object URL of its local thumbnail
+async function hydrateThumbs() {
+  const imgs = [...view.querySelectorAll('img[data-thumb]')];
+  const missing = [...new Set(imgs.map((i) => i.dataset.thumb).filter((id) => !thumbUrls.has(id)))];
+  if (missing.length) {
+    const got = await db.getThumbs(missing);
+    for (const id of missing) thumbUrls.set(id, got.has(id) ? URL.createObjectURL(got.get(id).blob) : null);
+  }
+  for (const img of imgs) {
+    const u = thumbUrls.get(img.dataset.thumb);
+    if (u && img.isConnected) {
+      img.src = u;
+      img.hidden = false;
+    }
+  }
+}
+
 function card(b, i) {
-  const coll = state.collections.find((c) => c.id === b.collectionId);
+  const colls = db.collectionsOf(b, state.collections);
   const open = state.open.has(b.id);
   const snippet = open ? b.text : (b.text || '').slice(0, 600);
   const tags = (b.tags || []).map((t) => `<span class="chip" data-act="tag" data-tag="${esc(t)}">#${esc(t)}<span class="x" data-act="rm-tag" data-tag="${esc(t)}" title="Remove">×</span></span>`);
@@ -470,13 +510,14 @@ function card(b, i) {
     .map((t) => `<span class="chip auto" data-act="accept-tag" data-tag="${esc(t)}" title="Suggested — click to keep">+${esc(t)}<span class="x" data-act="rm-auto" data-tag="${esc(t)}" title="Dismiss">×</span></span>`);
   return `<article class="card ${i === state.sel ? 'sel' : ''} ${open ? 'open' : ''}" data-id="${esc(b.id)}" data-i="${i}" tabindex="-1">
     <div class="meta"><span class="src ${esc(b.source)}">${esc(SOURCES[b.source] || b.source)}</span>
+      ${MEDIA[b.mediaType] ? `<span class="kind">${MEDIA[b.mediaType]}</span>` : ''}
       ${b.author ? `<span>${esc(b.author)}</span>` : `<span>${esc(host(b.url))}</span>`}
       <span title="${esc(new Date(b.savedAt).toLocaleString())}">saved ${ago(b.savedAt)}</span>
-      ${coll ? `<span class="chip coll" data-act="goto-coll" data-cid="${esc(coll.id)}">${esc(coll.name)}</span>` : ''}
+      ${colls.map((c) => `<span class="chip coll" data-act="goto-coll" data-cid="${esc(c.id)}">${esc(c.name)}</span>`).join('')}
     </div>
     <h3><a href="${esc(safeUrl(b.url))}" target="_blank" rel="noopener">${esc(b.title || b.url)}</a></h3>
     ${snippet ? `<div class="snip" data-act="toggle">${esc(snippet)}</div>` : ''}
-    ${b.image && !open ? `<img class="thumb" src="${esc(safeUrl(b.image))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}
+    ${open ? '' : thumbImg(b, 'thumb')}
     <div class="foot">${tags.join('')}${auto.join('')}
       <input class="tagin" data-act="tagin" placeholder="+ tag" aria-label="Add tag">
       <span class="spacer"></span>
@@ -489,10 +530,10 @@ function card(b, i) {
 function extra(b) {
   const related = relatedTo(b, 5);
   return `<div class="extra">
-    ${b.image ? `<img src="${esc(safeUrl(b.image))}" alt="" style="max-width:100%;border-radius:8px" referrerpolicy="no-referrer">` : ''}
+    ${thumbImg(b, 'big')}
     <label class="hint">Note<textarea data-act="note" placeholder="Why did you save this?">${esc(b.note)}</textarea></label>
     <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <select data-act="set-coll" aria-label="Collection"><option value="">No collection</option>
+      <select data-act="set-coll" aria-label="Collection"><option value="">${b.igCollections?.length ? 'No other collection' : 'No collection'}</option>
         ${state.collections.map((c) => `<option value="${esc(c.id)}" ${c.id === b.collectionId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
         <option value="__new">+ New collection…</option></select>
       <button class="ghost" data-act="retag">Re-suggest tags</button>
@@ -570,6 +611,11 @@ view.addEventListener('click', async (e) => {
       return chrome.tabs.create({ url: el.dataset.url });
     case 'reddit-sync':
       return redditSync();
+    case 'ig-sync':
+      return instagramSync();
+    case 'ig-import':
+      e.preventDefault();
+      return importInstagram();
     case 'rename-coll':
       return renameCollection(state.route.arg);
     case 'delete-coll':
@@ -630,10 +676,61 @@ async function renameCollection(id) {
 
 async function deleteCollection(id) {
   const c = state.collections.find((x) => x.id === id);
-  if (!c || !confirm(`Delete collection “${c.name}”? Its bookmarks are kept.`)) return;
+  const note = c?.igId ? ' Instagram syncs won’t bring it back.' : '';
+  if (!c || !confirm(`Delete collection “${c.name}”? Its bookmarks are kept.${note}`)) return;
   await db.deleteCollection(id);
   location.hash = '#all';
   load();
+}
+
+async function instagramSync(full = false) {
+  try {
+    const r = await send('instagramSync', { full });
+    if (r?.error) throw new Error(r.error);
+    if (r?.off) return toast('Instagram capture is off in Settings');
+    if (r?.running) return toast('Instagram is already syncing in its tab');
+    if (r?.cooldownUntil) return toast(`Instagram pushed back recently; see the card in the Instagram tab`);
+    toast('Instagram sync started; progress is in the Instagram tab');
+  } catch (e) {
+    toast('Instagram sync failed: ' + e.message);
+  }
+}
+
+// Instagram's own export: the .zip (any part of it), or saved_posts / saved_collections files from it.
+function importInstagram() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '.zip,.json,.html,application/zip,application/json,text/html';
+  input.onchange = async () => {
+    const files = [...input.files];
+    if (!files.length) return;
+    toast('Reading Instagram export…');
+    try {
+      const { items, collections, read } = await readInstagramExport(files);
+      if (!items.length) {
+        throw new Error(
+          read.length
+            ? 'no saved posts found in it'
+            : 'no saved posts found. Choose the export .zip, or saved_posts.json from inside it',
+        );
+      }
+      // File posts under the Stash collections that mirror their Instagram collections.
+      const map = collections.length ? await send('igCollections', { list: collections }) : {};
+      for (const it of items) if (it.igCollectionsAdd) it.igCollectionsAdd = it.igCollectionsAdd.map((id) => map[id] || id);
+      let added = 0;
+      for (let i = 0; i < items.length; i += 300) {
+        added += (await send('ingest', { items: items.slice(i, i + 300) })).added;
+        toast(`Importing Instagram saves… ${Math.min(i + 300, items.length)} / ${items.length}`);
+      }
+      await load();
+      const n = Object.keys(map).length;
+      toast(`Imported ${items.length} Instagram saves (${added} new)${n ? ` and ${n} collection${n === 1 ? '' : 's'}` : ''}`);
+    } catch (e) {
+      toast('Instagram import failed: ' + e.message);
+    }
+  };
+  input.click();
 }
 
 async function redditSync() {
@@ -819,9 +916,15 @@ function renderSettings() {
       <label class="check"><input type="checkbox" name="captureReddit"> Reddit saved posts and comments</label>
       <label class="check"><input type="checkbox" name="redditAutoSync"> Sync Reddit quietly while browsing reddit.com (every 6 hours at most)</label>
       <label class="check"><input type="checkbox" name="captureLinkedIn"> LinkedIn saved posts (captured while you view the Saved posts page)</label>
+      <label class="check"><input type="checkbox" name="captureInstagram"> Instagram saved posts and collections</label>
+      <label class="check"><input type="checkbox" name="igAutoSync"> Sync Instagram when you open your Saved posts (at most once an hour, one request every few seconds)</label>
+      <label class="check"><input type="checkbox" name="igThumbs"> Keep small copies of Instagram images in this browser (Instagram’s image links expire after a few days)</label>
       <div class="row"><button class="ghost" type="button" data-s="reddit">Sync Reddit now</button>
       <button class="ghost" type="button" data-s="x">Open X bookmarks</button>
-      <button class="ghost" type="button" data-s="li">Open LinkedIn saved</button></div>
+      <button class="ghost" type="button" data-s="li">Open LinkedIn saved</button>
+      <button class="ghost" type="button" data-s="ig">Sync Instagram now</button>
+      <button class="ghost" type="button" data-s="ig-import">Import Instagram export…</button></div>
+      ${igStatus()}
     </section>
 
     <section><h3>On-device AI</h3>
@@ -888,6 +991,7 @@ function renderSettings() {
     syncOpenAi();
     if (['resurface', 'reviewPerDay', 'accent'].includes(el.name)) send('refreshBadge').catch(() => {});
     if (el.name === 'localAi' && value) send('enrichNow').catch(() => {});
+    if (el.name === 'igThumbs' && value) send('thumbsNow').catch(() => {});
     toast('Saved');
   });
 
@@ -897,6 +1001,8 @@ function renderSettings() {
     if (a === 'reddit') return redditSync();
     if (a === 'x') return chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' });
     if (a === 'li') return chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' });
+    if (a === 'ig') return instagramSync();
+    if (a === 'ig-import') return importInstagram();
     if (a === 'reindex') {
       await send('reenrichAll');
       return toast('Re-indexing in the background…');
@@ -924,6 +1030,14 @@ function renderSettings() {
       toast('Everything deleted');
     }
   });
+}
+
+function igStatus() {
+  const ig = state.igState || {};
+  const bits = [];
+  if (ig.igLastSync) bits.push(`Instagram last synced ${ago(ig.igLastSync)}`);
+  if (ig.igCooldownUntil > Date.now()) bits.push(`paused after Instagram pushed back, until ${new Date(ig.igCooldownUntil).toLocaleString()}`);
+  return bits.length ? `<p>${esc(bits.join(' · '))}.</p>` : '';
 }
 
 // Host permission for the API endpoint is requested only when you configure one.
@@ -984,6 +1098,9 @@ function commands() {
     { label: 'Import JSON backup', run: importFile },
     ...Object.entries(LIST_FORMATS).map(([k, v]) => ({ label: `Export this view as ${v}`, run: () => exportCurrent(k) })),
     { label: 'Sync Reddit now', run: redditSync },
+    { label: 'Sync Instagram now', run: () => instagramSync() },
+    { label: 'Full Instagram rescan', run: () => instagramSync(true) },
+    { label: 'Import Instagram export…', run: importInstagram },
     { label: 'Open X bookmarks (sync)', run: () => chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' }) },
     { label: 'Open LinkedIn saved posts (sync)', run: () => chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' }) },
   ];
