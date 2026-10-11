@@ -442,6 +442,14 @@ const handlers = {
   async refreshBadge() {
     await refreshBadge();
   },
+  // An Instagram tab for "Download media": the open one, or a new background tab.
+  async igTab() {
+    const [tab] = await chrome.tabs.query({ url: ['https://www.instagram.com/*'] });
+    if (tab) return { tabId: tab.id, opened: false };
+    const t = await chrome.tabs.create({ url: 'https://www.instagram.com/', active: false });
+    await waitForLoad(t.id);
+    return { tabId: t.id, opened: true };
+  },
   async redditSync() {
     return redditSync();
   },

@@ -1,7 +1,7 @@
 import * as db from '../lib/db.js';
 import { getSettings, saveSettings, apiConfigured, DEFAULTS } from '../lib/settings.js';
 import { rank, cosine } from '../lib/search.js';
-import { exportJson, importJson, exportMarkdownZip, exportList, exportPeople, LIST_FORMATS } from '../lib/export.js';
+import { exportJson, importJson, exportMarkdownZip, exportList, exportPeople, LIST_FORMATS, zip } from '../lib/export.js';
 import { readInstagramExport } from '../lib/instagram-import.js';
 
 const PANEL = location.pathname.endsWith('panel.html');
@@ -403,10 +403,10 @@ function renderList() {
         : v === 's' && arg === 'linkedin'
           ? `<button class="ghost" data-act="open-url" data-url="https://www.linkedin.com/my-items/saved-posts/">Open LinkedIn saved posts to sync</button>`
           : v === 's' && arg === 'instagram'
-            ? `<button class="ghost" data-act="ig-sync">Sync Instagram now</button><button class="ghost" data-act="ig-import">Import Instagram export…</button>`
+            ? `<button class="ghost" data-act="ig-sync">Sync Instagram now</button><button class="ghost" data-act="ig-import">Import Instagram export…</button>${dlBtn(list)}`
             : v === 'c'
-            ? `<button class="ghost" data-act="rename-coll">Rename</button><button class="ghost" data-act="delete-coll">Delete collection</button>`
-            : '';
+            ? `${dlBtn(list)}<button class="ghost" data-act="rename-coll">Rename</button><button class="ghost" data-act="delete-coll">Delete collection</button>`
+            : dlBtn(list);
 
   const toolbar = `<div class="toolbar">
       <strong style="color:var(--text)">${esc(listTitle())}</strong>
@@ -563,6 +563,7 @@ function extra(b) {
       <select data-act="set-coll" aria-label="Collection"><option value="">${b.igCollections?.length ? 'No other collection' : 'No collection'}</option>
         ${state.collections.map((c) => `<option value="${esc(c.id)}" ${c.id === b.collectionId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
         <option value="__new">+ New collection…</option></select>
+      ${b.source === 'instagram' ? `<button class="ghost" data-act="ig-download" title="Save this post’s photos and videos (a carousel comes as a zip)">Download media</button>` : ''}
       <button class="ghost" data-act="retag">Re-suggest tags</button>
       <button class="ghost" data-act="resurface">${b.reviewDue ? `Resurfaces ${new Date(b.reviewDue).toLocaleDateString()}` : 'Add to resurface'}</button>
       <span class="spacer" style="flex:1"></span>
@@ -638,6 +639,14 @@ view.addEventListener('click', async (e) => {
       return chrome.tabs.create({ url: el.dataset.url });
     case 'reddit-sync':
       return redditSync();
+    case 'ig-download':
+      return downloadMedia([b]);
+    case 'ig-download-view':
+      if (state.dl) {
+        state.dl.stop = true;
+        return toast('Stopping after this post…');
+      }
+      return downloadMedia(currentList());
     case 'ig-sync':
       return instagramSync();
     case 'ig-import':
@@ -708,6 +717,104 @@ async function deleteCollection(id) {
   await db.deleteCollection(id);
   location.hash = '#all';
   load();
+}
+
+// ---------- Instagram media download ----------
+// Like Sort Feed: Stash asks Instagram for each post's files (from an Instagram
+// tab, so it carries your session), then fetches them straight from Instagram's
+// servers. Nothing passes through anyone else. Only when you ask, one post about
+// every 1–2 s, and it stops at the first pushback.
+
+const ZIP_PART_BYTES = 500 * 1024 * 1024;
+const EXT = { 'video/mp4': 'mp4', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/png': 'png', 'image/heic': 'heic' };
+
+function dlBtn(list) {
+  const n = list.filter((b) => b.source === 'instagram').length;
+  if (!n) return '';
+  return state.dl
+    ? `<button class="ghost" data-act="ig-download-view">Stop download</button>`
+    : `<button class="ghost" data-act="ig-download-view" title="Save the photos and videos of the Instagram posts in this view, in this order, as a zip">Download media (${n})</button>`;
+}
+
+async function askInstagramTab(tabId, code) {
+  for (let i = 0; i < 10; i++) {
+    try {
+      const r = await chrome.tabs.sendMessage(tabId, { type: 'ig-media', code });
+      if (r) return r;
+    } catch {}
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  return { error: 'couldn’t reach the Instagram tab' };
+}
+
+async function downloadMedia(items) {
+  items = items.filter((b) => b.source === 'instagram');
+  if (!items.length || state.dl) return;
+  const bulk = items.length > 1;
+  if (bulk && !confirm(`Download the photos and videos of ${items.length} Instagram posts?\n\nStash asks Instagram for each post in turn, about one every 1–2 seconds, through an Instagram tab. You can stop at any time.`)) return;
+  const dl = (state.dl = { stop: false });
+  if (bulk) renderList();
+  const pad = String(items.length).length;
+  const day = new Date().toISOString().slice(0, 10);
+  let files = [];
+  let bytes = 0;
+  let part = 0;
+  let saved = 0;
+  let failed = 0;
+  let note = '';
+  const flush = (last) => {
+    if (!files.length) return;
+    if (!bulk && files.length === 1) download(new Blob([files[0].data]), files[0].path);
+    else if (!bulk) download(zip(files), files[0].path.replace(/(_1)?\.[a-z0-9]+$/, '') + '.zip');
+    else download(zip(files), `${slugName(listTitle())}-media-${day}${part || !last ? `-part${++part}` : ''}.zip`);
+    files = [];
+    bytes = 0;
+  };
+  let tab;
+  try {
+    tab = await send('igTab');
+    for (const [i, b] of items.entries()) {
+      if (dl.stop) {
+        note = ' (stopped)';
+        break;
+      }
+      if (i) await new Promise((res) => setTimeout(res, 1000 + Math.random() * 1000));
+      toast(bulk ? `Downloading media… ${i + 1} / ${items.length}` : 'Downloading media…');
+      const code = b.id.slice('instagram:'.length);
+      const r = await askInstagramTab(tab.tabId, code);
+      if (r?.pushback) {
+        note = `. Stopped: ${r.message}`;
+        break;
+      }
+      if (!r?.files?.length) {
+        failed++;
+        continue;
+      }
+      const base = `${bulk ? String(i + 1).padStart(pad, '0') + '_' : ''}${b.authorHandle || 'instagram'}_${code}`;
+      for (const [j, f] of r.files.entries()) {
+        try {
+          const res = await fetch(f.url, { credentials: 'omit' });
+          if (!res.ok) throw new Error(res.status);
+          const data = new Uint8Array(await res.arrayBuffer());
+          const ext = EXT[(res.headers.get('content-type') || '').split(';')[0]] || (f.kind === 'video' ? 'mp4' : 'jpg');
+          files.push({ path: `${base}${r.files.length > 1 ? `_${j + 1}` : ''}.${ext}`, data });
+          bytes += data.length;
+        } catch {
+          failed++;
+        }
+      }
+      saved++;
+      if (bytes > ZIP_PART_BYTES) flush(false);
+    }
+    flush(true);
+  } catch (e) {
+    note = `. ${e.message}`;
+  } finally {
+    state.dl = null;
+    if (tab?.opened) chrome.tabs.remove(tab.tabId).catch(() => {});
+    if (bulk) renderList();
+  }
+  toast(`${saved ? `Downloaded media of ${saved} post${saved === 1 ? '' : 's'}` : 'Nothing downloaded'}${failed ? `, ${failed} failed` : ''}${note}`);
 }
 
 async function instagramSync(full = false) {

@@ -488,6 +488,26 @@
     start(mode, reason);
   }
 
+  // "Download media" in Stash: the library asks this tab for a post's files,
+  // one post at a time, so the request carries this page's session and headers.
+  const SHORTCODE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  function pkOf(code) {
+    let n = 0n;
+    for (const ch of String(code).slice(0, 11)) {
+      const i = SHORTCODE.indexOf(ch);
+      if (i < 0) return null;
+      n = n * 64n + BigInt(i);
+    }
+    return n ? n.toString() : null;
+  }
+  chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+    if (msg?.type !== 'ig-media') return;
+    const pk = pkOf(msg.code);
+    if (!pk) return sendResponse({ error: 'not an Instagram post' });
+    ask({ __stash: 'ig-media', pk }).then(sendResponse);
+    return true;
+  });
+
   // "Sync Instagram now" in Stash.
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     if (msg?.type !== 'ig-sync') return;

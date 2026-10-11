@@ -378,6 +378,73 @@ async function profileA() {
   const j = exported.json.find((x) => x.url.includes(reel.code));
   check(j?.views === fake.playCount(reel.n) && j.likes === 100 + reel.n && j.comments === reel.n % 13 && /^\d{4}-\d\d-\d\d$/.test(j.countsAsOf), 'JSON export has the counts and their date', j);
 
+  console.log('\nA3c. Download media, one post or the whole view');
+  // Catch the files the library saves instead of writing them to disk; list the names inside zips.
+  const caught = async () =>
+    t.lib.evaluate(async () => {
+      const out = [];
+      for (const d of window.__dl || []) {
+        const buf = new Uint8Array(await (await fetch(d.href)).arrayBuffer());
+        const v = new DataView(buf.buffer);
+        const entries = [];
+        if (d.name.endsWith('.zip')) for (let i = 0; i + 46 < buf.length; i++) if (v.getUint32(i, true) === 0x02014b50) entries.push(new TextDecoder().decode(buf.subarray(i + 46, i + 46 + v.getUint16(i + 28, true))));
+        out.push({ name: d.name, size: buf.length, head: new TextDecoder().decode(buf.subarray(0, 9)), entries });
+      }
+      window.__dl = [];
+      return out;
+    });
+  const catchDownloads = () =>
+    t.lib.evaluate(() => {
+      window.__dl = [];
+      HTMLAnchorElement.prototype.click = function () {
+        if (this.download) window.__dl.push({ name: this.download, href: this.href });
+      };
+      URL.revokeObjectURL = () => {};
+    });
+  const openCard = async (code) => {
+    await t.lib.goto(`chrome-extension://${t.id}/src/ui/library.html#s/instagram`);
+    await t.lib.waitForSelector('.card');
+    const sel = `.card[data-id="instagram:${code}"]`;
+    while (!(await t.lib.$(sel))) await t.lib.click('[data-act="more"]');
+    await catchDownloads();
+    await t.lib.click(`${sel} button[data-act="toggle"]`);
+    await t.lib.click(`.card[data-id="instagram:${code}"] [data-act="ig-download"]`);
+  };
+  const carousel = fakeState.posts.find((p) => p.kind === 'carousel');
+  let apiBefore = (await extRequests()).length;
+  await openCard(carousel.code);
+  await waitFor(async () => (await t.lib.evaluate(() => (window.__dl || []).length)) > 0, 20000, 'carousel download');
+  let got = await caught();
+  check(got.length === 1 && got[0].name === `${carousel.username}_${carousel.code}.zip` && got[0].entries.length === 3 && got[0].entries.every((e, k) => e === `${carousel.username}_${carousel.code}_${k + 1}.png`), 'a carousel downloads as one zip of its 3 slides', got);
+  const mediaReqs = (await extRequests()).slice(apiBefore).filter((r) => r.path.startsWith('/api/v1/media/'));
+  const codeOf = (id) => { let c = ''; for (let n = BigInt(id); n > 0n; n /= 64n) c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[Number(n % 64n)] + c; return c; };
+  check(mediaReqs.length === 1 && codeOf(mediaReqs[0].path.split('/')[4]) === carousel.code, 'one media-info request, with the id worked out from the link', mediaReqs.map((r) => r.path));
+  await openCard(reel.code);
+  await waitFor(async () => (await t.lib.evaluate(() => (window.__dl || []).length)) > 0, 20000, 'reel download');
+  got = await caught();
+  check(got.length === 1 && got[0].name === `${reel.username}_${reel.code}.mp4` && got[0].head === 'fake mp4 ' && got[0].size > 10000, 'a Reel downloads as its .mp4', got);
+
+  const travel = d.cols.find((x) => x.name === 'Travel');
+  await t.lib.goto(`chrome-extension://${t.id}/src/ui/library.html#c/${travel.id}`);
+  await t.lib.waitForSelector('.card');
+  await catchDownloads();
+  const viewOrder = await t.lib.evaluate(() => [...document.querySelectorAll(".card")].map((c) => c.dataset.id.slice(10)));
+  t.lib.once('dialog', (dlg) => dlg.accept());
+  apiBefore = (await extRequests()).length;
+  await t.lib.click('[data-act="ig-download-view"]');
+  await waitFor(async () => (await t.lib.evaluate(() => (window.__dl || []).length)) > 0, 60000, 'view download');
+  got = await caught();
+  const posts = new Map(fakeState.posts.map((p) => [p.code, p]));
+  const want = viewOrder.flatMap((code, i) => {
+    const p = posts.get(code);
+    const base = `${String(i + 1).padStart(2, '0')}_${p.username}_${code}`;
+    return p.kind === 'carousel' ? [1, 2, 3].map((k) => `${base}_${k}.png`) : [`${base}.${p.kind === 'reel' || p.kind === 'video' ? 'mp4' : 'png'}`];
+  });
+  check(got.length === 1 && /^travel-media-\d{4}-\d\d-\d\d\.zip$/.test(got[0].name) && JSON.stringify(got[0].entries) === JSON.stringify(want), `the collection view downloads as one zip, in the view’s order (${want.length} files from 12 posts)`, [got[0]?.name, got[0]?.entries.slice(0, 4), want.slice(0, 4)]);
+  const viewReqs = (await extRequests()).slice(apiBefore).filter((r) => r.path.startsWith('/api/v1/media/'));
+  check(viewReqs.length === 12 && Math.min(...gaps(viewReqs)) >= 950, `12 media requests, paced (shortest gap ${Math.min(...gaps(viewReqs))} ms)`, viewReqs.length);
+  check(await t.lib.evaluate(() => /Download media \(12\)/.test(document.querySelector('[data-act="ig-download-view"]')?.textContent || '')), 'the button is back to “Download media (12)” when done');
+
   console.log('\nA4. “Sync Instagram now” picks up new saves; collections wait until Stash has seen how Instagram loads one');
   await admin('/save', { count: 2 });
   const travelNew = (await admin('/save', { count: 1, collection: '17890000000000002' })).added[0];

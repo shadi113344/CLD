@@ -655,6 +655,40 @@
     return { ok: true, status, ...r };
   }
 
+  // The files of one post, for "Download media" in Stash: the best video, else
+  // the largest image, for each slide of a carousel. Same request Sort Feed uses.
+  function mediaFiles(m) {
+    const best = (list) => (list || []).filter((c) => c?.url).sort((a, b) => (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0))[0];
+    const one = (x) => {
+      const v = best(x.video_versions);
+      if (v) return { url: v.url, kind: 'video' };
+      const i = best(x.image_versions2?.candidates);
+      return i ? { url: i.url, kind: 'image' } : null;
+    };
+    const slides = m.carousel_media?.length ? m.carousel_media : [m];
+    return slides.map(one).filter(Boolean);
+  }
+
+  async function mediaRequest(pk) {
+    if (!/^\d{5,30}$/.test(String(pk))) return { error: 'bad media id' };
+    let res;
+    let text = '';
+    let json = null;
+    try {
+      res = await origFetch(`/api/v1/media/${pk}/info/`, { headers: requestHeaders(), credentials: 'include' });
+      text = await res.text();
+      json = JSON.parse(text);
+    } catch {}
+    const status = res?.status ?? 0;
+    // A deleted or private post is a 404, often an HTML page; that's not a logout.
+    if (status === 404) return { status, error: 'post not found (deleted or private)' };
+    const bad = verdict(status, json, text);
+    if (bad) return { status, ...bad };
+    const m = json?.items?.[0];
+    if (!m) return { status, error: 'unexpected response' };
+    return { ok: true, status, files: mediaFiles(m) };
+  }
+
   const describe = (r) => `${r.status}${r.items ? `, ${r.items.length} posts` : ''}${r.pushback ? ` (${r.pushback})` : ''}${r.error ? ` (${r.error})` : ''}`;
   window.addEventListener('message', async (e) => {
     if (e.source !== window) return;
@@ -662,6 +696,10 @@
     if (d?.__stash === 'ig-fetch') {
       const r = await request(d.path);
       log(`GET ${String(d.path).split('?')[0]} → ${describe(r)}`);
+      post('ig-fetch-result', { id: d.id, result: r });
+    } else if (d?.__stash === 'ig-media') {
+      const r = await mediaRequest(d.pk);
+      log(`GET /api/v1/media/${d.pk}/info/ → ${r.status}${r.files ? `, ${r.files.length} files` : ''}${r.pushback ? ` (${r.pushback})` : ''}${r.error ? ` (${r.error})` : ''}`);
       post('ig-fetch-result', { id: d.id, result: r });
     } else if (d?.__stash === 'ig-gql') {
       const r = await gqlRequest(d.template, d.igId, d.cursor);

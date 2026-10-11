@@ -56,13 +56,24 @@ const CAPTIONS = [
   'How we redesigned our onboarding (thread) →',
 ];
 
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+function shortcode(pk) {
+  let n = BigInt(pk);
+  let out = '';
+  while (n > 0n) {
+    out = B64[Number(n % 64n)] + out;
+    n /= 64n;
+  }
+  return out;
+}
+
 function makePost(n) {
   const kinds = ['photo', 'photo', 'reel', 'carousel', 'video'];
   const kind = kinds[n % kinds.length];
   const [username, full_name] = AUTHORS[n % AUTHORS.length];
   const taken_at = 1700000000 - n * 86400;
   const pk = String(((BigInt(taken_at) * 1000n - ID_EPOCH) << 23n) | BigInt(n % 4096));
-  const code = `C${(n * 104729 + 2147483647).toString(36)}Ab_${n % 3 ? 'x' : '-'}`;
+  const code = shortcode(pk); // as on Instagram: the media id in base 64
   return {
     n,
     pk,
@@ -160,7 +171,7 @@ function media(p, { gql = false } = {}) {
     m.carousel_media = [0, 1, 2].map((k) => ({ id: `${p.pk}${k}_1`, media_type: 1, image_versions2: { candidates: candidates({ ...p, pk: p.pk + k }) } }));
   }
   if (p.kind === 'reel' || p.kind === 'video') {
-    m.video_versions = [{ type: 101, width: 720, height: 1280, url: `https://${CDN_HOST}/o1/v/t16/${p.pk}.mp4?oe=0` }];
+    m.video_versions = [{ type: 101, width: 720, height: 1280, url: `https://${CDN_HOST}/o1/v/t16/${p.pk}.mp4?oe=${(now() + S.scenario.linkTtl).toString(16).toUpperCase()}` }];
     m.play_count = playCount(p.n);
   }
   if (gql && !S.scenario.gqlTakenAt && p.kind === 'reel') delete m.taken_at;
@@ -513,6 +524,12 @@ function api(req, res, url) {
     if (!S.scenario.rest || !S.scenario.restCollectionsList) return reply(404, { message: '', status: 'fail' });
     return reply(200, collectionsList());
   }
+  m = p.match(/^\/api\/v1\/media\/(\d+)\/info\/$/);
+  if (m) {
+    const post = S.posts.find((x) => x.pk === m[1]);
+    if (!post) return reply(404, NOT_FOUND_PAGE);
+    return reply(200, { items: [media(post)], num_results: 1, more_available: false, status: 'ok' });
+  }
   if (p === '/api/v1/web/accounts/badge/') return reply(200, { status: 'ok' });
   return reply(404, { message: 'not found', status: 'fail' });
 }
@@ -524,6 +541,11 @@ function handler(req, res) {
     S.log.push({ t: Date.now(), src: 'cdn', path: url.pathname, status: 0 });
     const oe = parseInt(url.searchParams.get('oe') || '0', 16);
     if (!oe || oe < now()) return send(res, 403, 'URL signature expired', { 'content-type': 'text/plain' });
+    const v = url.pathname.match(/\/(\d+)\.mp4$/);
+    if (v) {
+      S.log[S.log.length - 1].status = 200;
+      return send(res, 200, Buffer.from(`fake mp4 ${v[1]} `.repeat(4000)), { 'content-type': 'video/mp4' });
+    }
     const m = url.pathname.match(/\/(\d+)_(\d+)x(\d+)_n\.jpg$/);
     if (!m) return send(res, 404, 'not found', { 'content-type': 'text/plain' });
     S.log[S.log.length - 1].status = 200;

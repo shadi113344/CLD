@@ -1,4 +1,4 @@
-# Stash: handoff notes (milestone v1.7.0)
+# Stash: handoff notes (milestone v1.8.0)
 
 Give this file to a new chat to continue. The code lives in the GitHub repo `shadi113344/CLD`, under the `stash/` folder, on branch `claude/zealous-shannon-vzvr8m`. The repo root is an ideas space: never build there. The full history from v1.0 is preserved.
 
@@ -79,7 +79,15 @@ Items 1–3 of `research/sort-feed/PLAN.md` are done.
 
 ## Next: the rest of the Sort Feed plan
 
-`research/sort-feed/` at the repo root has a reverse-engineering report on Sort Feed 17.0 (`REPORT.md`) and a plan for Stash (`PLAN.md`). Items 1–3 are done (see above). Item 4 (on-device Reel transcripts) was dropped by the user on 2026-10-11; don't build it. Still open, for later: item 5, downloading a saved post's media on request, and Instagram people lists.
+`research/sort-feed/` at the repo root has a reverse-engineering report on Sort Feed 17.0 (`REPORT.md`) and a plan for Stash (`PLAN.md`). Items 1–3 are done (see above). Item 4 (on-device Reel transcripts) was dropped by the user on 2026-10-11; don't build it. Item 5's media download is done in v1.8.0 (below). Still open: Instagram people lists.
+
+## Instagram (v1.8.0): Download media
+
+- **Where:** a post's details panel (**Download media**), and the toolbar of the Instagram view or any view holding Instagram posts (**Download media (N)**, which becomes **Stop download** while running).
+- **How:** `library.js` `downloadMedia()` asks the background for an Instagram tab (`igTab`: the open one, or a new background tab that is closed afterwards), then sends `ig-media {code}` to it per post. `ig-bridge.js` turns the shortcode into the media id (base 64, first 11 characters) and asks `ig-main.js`, which makes `GET /api/v1/media/<pk>/info/` with the app's headers and returns the best video, else the largest image, per slide. A 404 means the post is gone (not a logout); other answers go through `verdict()`, and any pushback stops the run. The library fetches the files from the CDN itself (host permission) and saves them with `zip()` from `export.js`.
+- **Names:** one file → `<handle>_<code>.<ext>`; a carousel → `<handle>_<code>.zip` holding `_1`, `_2`…; a view → `<view>-media-<date>.zip` with `NN_` prefixes in the view's order, split into parts past 500 MB.
+- **Pace:** 1–2 s between posts, only when asked. No `downloads` permission: files are saved through a blob link, as Sort Feed does.
+- **Tests:** profile A section A3c (carousel zip, Reel mp4, a 12-post collection zip in order, paced requests). The fake's shortcodes are now real (derived from the pk), it answers `/api/v1/media/<pk>/info/`, and its CDN serves `.mp4` files.
 
 ## Ideas not started
 

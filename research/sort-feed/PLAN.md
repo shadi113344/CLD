@@ -2,7 +2,7 @@
 
 Stash v1.6.0 already syncs Instagram saved posts (branch `claude/zealous-shannon-vzvr8m`). This plan compares that code with Sort Feed 17.0, which was published on 2026-10-10 and has been running against the real Instagram. It lists what to change in Stash, in order. The findings themselves are in [`REPORT.md`](REPORT.md).
 
-**Status (2026-10-11):** items 1, 2 and 3 are done in Stash v1.7.0 (see `stash/HANDOFF.md`). Item 4 is dropped (your decision, 2026-10-11). Item 5 is for later.
+**Status (2026-10-11):** items 1, 2 and 3 are done in Stash v1.7.0 (see `stash/HANDOFF.md`). Item 4 is dropped (your decision, 2026-10-11). Item 5's media download is done in v1.8.0; Instagram people lists are still for later.
 
 **The first item matters most.** Sort Feed's own notes say Instagram retired the REST endpoint that Stash uses to page each collection. If that's right, collection sync in v1.6.0 will fail on the real site, even though all 61 checks pass against the fake.
 
@@ -102,7 +102,7 @@ Sort Feed sends audio to its server. Stash can do this privately, because it alr
 
 ## 5. Later, if wanted
 
-- **Download the media of a saved post** (video, photo, carousel as a zip), only when you ask. Sort Feed's media-info request plus a small uncompressed-zip writer is enough; there's no need for JSZip, since Stash already has `unzip.js`.
+- **Download the media of a saved post** (video, photo, carousel as a zip), only when you ask. *Done in v1.8.0, plus a whole view as one zip in its sort order.* Sort Feed's media-info request plus a small uncompressed-zip writer is enough; there's no need for JSZip, since Stash already has `unzip.js`.
 - **Instagram people lists** (already in "Ideas not started"). Sort Feed's reliability notes apply: learn the request from the page, stop on the first pushback.
 
 ## What Stash should not copy
