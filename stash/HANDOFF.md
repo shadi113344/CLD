@@ -79,13 +79,9 @@ Items 1–3 of `research/sort-feed/PLAN.md` are done.
 
 ## Next: the rest of the Sort Feed plan
 
-`research/sort-feed/` at the repo root has a reverse-engineering report on Sort Feed 17.0 (`REPORT.md`) and a plan for Stash (`PLAN.md`). Items 1–3 are done (see above). Still open:
-
-- **Item 4: on-device transcripts of saved Reels** with Whisper (about 40–75 MB downloaded on first use, one media-info request per Reel, only when asked). Waiting on the user's go-ahead.
-- **Item 5, later:** downloading a saved post's media on request; Instagram people lists.
+`research/sort-feed/` at the repo root has a reverse-engineering report on Sort Feed 17.0 (`REPORT.md`) and a plan for Stash (`PLAN.md`). Items 1–3 are done (see above). Item 4 (on-device Reel transcripts) was dropped by the user on 2026-10-11; don't build it. Still open, for later: item 5, downloading a saved post's media on request, and Instagram people lists.
 
 ## Ideas not started
 
 - People lists for Instagram (followers/following), like X.
-- From the Sort Feed plan: on-device transcripts of saved Reels with Whisper (item 4).
 - Re-fetching captions for export-only posts without a live sync. That would mean one request per post, which is risky on Instagram, so it was deliberately left out.

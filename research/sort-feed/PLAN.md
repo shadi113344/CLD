@@ -2,7 +2,7 @@
 
 Stash v1.6.0 already syncs Instagram saved posts (branch `claude/zealous-shannon-vzvr8m`). This plan compares that code with Sort Feed 17.0, which was published on 2026-10-10 and has been running against the real Instagram. It lists what to change in Stash, in order. The findings themselves are in [`REPORT.md`](REPORT.md).
 
-**Status (2026-10-11):** items 1, 2 and 3 are done in Stash v1.7.0 (see `stash/HANDOFF.md`). Item 4 waits on your go-ahead for the model download; item 5 is for later.
+**Status (2026-10-11):** items 1, 2 and 3 are done in Stash v1.7.0 (see `stash/HANDOFF.md`). Item 4 is dropped (your decision, 2026-10-11). Item 5 is for later.
 
 **The first item matters most.** Sort Feed's own notes say Instagram retired the REST endpoint that Stash uses to page each collection. If that's right, collection sync in v1.6.0 will fail on the real site, even though all 61 checks pass against the fake.
 
@@ -87,7 +87,9 @@ This is Sort Feed's core idea, applied to your own saves and done entirely local
 - **No outlier score here.** It needs one creator's own history, and Saved mixes creators; Sort Feed doesn't score Saved either. An optional "×N vs this creator's other saves" only makes sense when you've saved several posts from one creator. Leave it out.
 - **Freshness:** the numbers are as of the last sync, so the card says "as of <date>". Refreshing them is just the next sync.
 
-## 4. New: on-device transcripts for saved Reels (larger, optional)
+## 4. New: on-device transcripts for saved Reels (dropped)
+
+*Dropped on 2026-10-11: not wanted. Kept here for the record only.*
 
 Sort Feed sends audio to its server. Stash can do this privately, because it already runs transformers.js in an offscreen document.
 
@@ -110,8 +112,8 @@ Sort Feed sends audio to its server. Stash can do this privately, because it alr
 - **No review gating,** and an honest privacy label. Stash's README already describes exactly what leaves the browser.
 - **No traffic made to look human.** Stash requests the same pages the app does, at a slower pace, and stops when asked.
 
-## Open decisions for you
+## Decisions (2026-10-11)
 
-1. Go ahead with item 1 now? (Recommended. It's a likely break on the real site.)
-2. Item 3 (sort by views, likes, comments): yes or no?
-3. Item 4 (on-device transcripts): worth a 40 to 75 MB model download on first use?
+1. Item 1: done.
+2. Item 3 (sort by views, likes, comments): done.
+3. Item 4 (on-device transcripts): dropped.
