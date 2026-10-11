@@ -11,6 +11,9 @@ export const DEFAULTS = {
   captureReddit: true,
   captureLinkedIn: true,
   redditAutoSync: true,
+  captureInstagram: true,
+  igAutoSync: true, // sync when Instagram loads your Saved posts (at most hourly)
+  igThumbs: true, // keep small local copies of Instagram images (their links expire)
 
   // AI
   localAi: true, // on-device embeddings for search, grouping and auto-tags

@@ -2,6 +2,7 @@ import * as db from './lib/db.js';
 import { getSettings, apiConfigured } from './lib/settings.js';
 import { embed, localTags, apiTags, apiAnswer, testApi } from './lib/ai.js';
 import { rank, embedText } from './lib/search.js';
+import { makeThumb } from './lib/thumbs.js';
 
 // Spaced resurfacing: days until a bookmark comes back after each "keep".
 const REVIEW_STEPS = [3, 7, 21, 60, 180];
@@ -24,10 +25,14 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(() => {
   refreshBadge();
   scheduleEnrich();
+  scheduleThumbs();
 });
 
 chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === 'enrich') scheduleEnrich();
+  if (a.name === 'enrich') {
+    scheduleEnrich();
+    scheduleThumbs();
+  }
   if (a.name === 'resurface') resurfaceTick();
 });
 
@@ -178,6 +183,82 @@ async function enrichLoop() {
   }
 }
 
+// ---------- thumbnails (Instagram image links expire within days) ----------
+
+let thumbing = null;
+function scheduleThumbs() {
+  thumbing ??= thumbLoop().finally(() => (thumbing = null));
+  return thumbing;
+}
+
+async function thumbLoop() {
+  if (!(await getSettings()).igThumbs) return;
+  for (let round = 0; round < 50; round++) {
+    const todo = await db.pendingThumbs();
+    if (!todo.length) return;
+    console.info(`[Stash] saving ${todo.length} thumbnail${todo.length === 1 ? '' : 's'}`);
+    for (let i = 0; i < todo.length; i += 4) {
+      await Promise.all(todo.slice(i, i + 4).map(saveThumb));
+      if (i % 24 === 20) broadcast({ type: 'changed' });
+    }
+    broadcast({ type: 'changed' });
+  }
+}
+
+async function saveThumb(b) {
+  try {
+    await db.putThumb(b.id, await makeThumb(b.image));
+    await db.patchBookmark(b.id, { thumb: 1 });
+  } catch (e) {
+    // Remember which link failed; a later sync brings a fresh link to try.
+    console.info('[Stash] thumbnail failed for', b.id, String(e?.message || e));
+    await db.patchBookmark(b.id, { thumbFailed: b.image });
+  }
+}
+
+// ---------- instagram ----------
+
+async function instagramSync({ full }) {
+  const { igUsername } = await chrome.storage.local.get('igUsername');
+  let [tab] = await chrome.tabs.query({ url: ['https://www.instagram.com/*'] });
+  if (tab) {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+  } else {
+    // Saved is the natural place to watch progress; without a username, any page works.
+    const url = igUsername ? `https://www.instagram.com/${igUsername}/saved/all-posts/` : 'https://www.instagram.com/';
+    tab = await chrome.tabs.create({ url, active: true });
+    await waitForLoad(tab.id);
+  }
+  for (let i = 0; i < 20; i++) {
+    try {
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'ig-sync', full: Boolean(full) });
+      if (r) return r;
+    } catch {
+      // A tab opened before Stash was installed or updated has no content script yet: reload it once.
+      if (i === 1) {
+        await chrome.tabs.reload(tab.id);
+        await waitForLoad(tab.id);
+      }
+    }
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  throw new Error('Couldn’t reach the Instagram tab. Reload it and try again.');
+}
+
+function waitForLoad(tabId) {
+  return new Promise((resolve) => {
+    const done = () => {
+      chrome.tabs.onUpdated.removeListener(l);
+      clearTimeout(timer);
+      resolve();
+    };
+    const l = (id, info) => id === tabId && info.status === 'complete' && done();
+    const timer = setTimeout(done, 30000);
+    chrome.tabs.onUpdated.addListener(l);
+  });
+}
+
 // ---------- resurfacing ----------
 
 async function refreshBadge() {
@@ -264,19 +345,38 @@ function broadcast(msg) {
 const handlers = {
   async ingest({ items }, sender) {
     const s = await getSettings();
-    const allowed = { x: s.captureX, reddit: s.captureReddit, linkedin: s.captureLinkedIn };
+    const allowed = { x: s.captureX, reddit: s.captureReddit, linkedin: s.captureLinkedIn, instagram: s.captureInstagram };
     items = items.filter((i) => allowed[i.source] !== false);
-    if (!items.length) return { added: 0 };
-    const added = await db.upsertMany(items);
+    if (!items.length) return { added: 0, addedIds: [], linked: 0, total: 0 };
+    const stats = {};
+    const added = await db.upsertMany(items, stats);
     if (s.resurface) {
       for (const id of added) {
         const b = await db.getBookmark(id);
-        await db.patchBookmark(id, { reviewDue: b.savedAt + REVIEW_STEPS[0] * DAY });
+        // Imported saves can be years old; they still wait the first gap from today.
+        await db.patchBookmark(id, { reviewDue: Math.max(b.savedAt, Date.now()) + REVIEW_STEPS[0] * DAY });
       }
     }
-    if (added.length) broadcast({ type: 'changed' });
+    if (added.length || stats.updated) broadcast({ type: 'changed' });
     scheduleEnrich();
-    return { added: added.length, total: items.length };
+    if (items.some((i) => i.source === 'instagram')) scheduleThumbs();
+    return { added: added.length, addedIds: added, linked: stats.linked, total: items.length };
+  },
+  async igCollections({ list }) {
+    const map = await db.mirrorIgCollections(list);
+    broadcast({ type: 'changed' });
+    return map;
+  },
+  async igCollectionFinalize({ igId, keepIds }) {
+    const removed = await db.finalizeIgCollection(igId, keepIds);
+    if (removed) broadcast({ type: 'changed' });
+    return { removed };
+  },
+  async instagramSync({ full }) {
+    return instagramSync({ full });
+  },
+  async thumbsNow() {
+    await scheduleThumbs();
   },
   async ingestPeople({ owner, relation, people }) {
     const added = await db.upsertPeople(owner, relation, people);

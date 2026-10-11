@@ -6,9 +6,16 @@ export async function exportJson() {
   const bookmarks = (await db.allBookmarks()).map(({ embedding, ...b }) => b);
   const collections = await db.allCollections();
   const people = await db.allPeople();
-  return new Blob([JSON.stringify({ app: 'stash', version: 1, exportedAt: new Date().toISOString(), collections, bookmarks, people }, null, 2)], {
-    type: 'application/json',
-  });
+  const thumbs = await db.allThumbs();
+  // Built in parts so thousands of thumbnails never become one giant string.
+  const head = JSON.stringify({ app: 'stash', version: 1, exportedAt: new Date().toISOString(), collections, bookmarks, people }, null, 2);
+  const parts = [head.slice(0, head.lastIndexOf('}')).trimEnd(), ',\n  "thumbs": ['];
+  for (let i = 0; i < thumbs.length; i++) {
+    const t = thumbs[i];
+    parts.push((i ? ',' : '') + '\n    ' + JSON.stringify({ id: t.id, type: t.type, width: t.width, height: t.height, data: await blobToBase64(t.blob) }));
+  }
+  parts.push('\n  ]\n}\n');
+  return new Blob(parts, { type: 'application/json' });
 }
 
 export async function importJson(text) {
@@ -21,6 +28,12 @@ export async function importJson(text) {
       await db.upsertPeople(owner, relation, [p]);
     }
   }
+  const thumbIds = new Set();
+  for (const t of data.thumbs || []) {
+    if (!t?.id || !t.data) continue;
+    await db.putThumb(t.id, { blob: base64ToBlob(t.data, t.type), width: t.width, height: t.height });
+    thumbIds.add(t.id);
+  }
   let added = 0;
   for (const b of data.bookmarks) {
     if (!b?.id) continue;
@@ -29,9 +42,28 @@ export async function importJson(text) {
     const merged = cur
       ? { ...cur, ...b, tags: [...new Set([...(cur.tags || []), ...(b.tags || [])])], embedding: cur.embedding, enriched: cur.enriched }
       : { ...db.newBookmark(b), ...b, embedding: null, enriched: 0 };
+    // Only claim a local thumbnail if one is really there (older backups have none).
+    if (thumbIds.has(b.id) || cur?.thumb) merged.thumb = 1;
+    else delete merged.thumb;
     await db.putBookmark(merged);
   }
   return { added, total: data.bookmarks.length };
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+function base64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: type || 'image/webp' });
 }
 
 // ---------- markdown ----------
@@ -44,38 +76,51 @@ function yamlStr(s) {
   return JSON.stringify(String(s ?? ''));
 }
 
-function toMarkdown(b, collectionName) {
+function toMarkdown(b, collectionNames, image) {
   const tags = [...new Set([...(b.tags || []), ...(b.autoTags || [])])].map((t) => t.replace(/\s+/g, '-'));
   const fm = [
     '---',
     `title: ${yamlStr(b.title)}`,
     `url: ${yamlStr(b.url)}`,
     `source: ${b.source}`,
+    b.mediaType ? `media: ${b.mediaType}` : null,
     b.author ? `author: ${yamlStr(b.author)}` : null,
-    collectionName ? `collection: ${yamlStr(collectionName)}` : null,
+    collectionNames.length === 1 ? `collection: ${yamlStr(collectionNames[0])}` : null,
+    collectionNames.length > 1 ? `collections: [${collectionNames.map(yamlStr).join(', ')}]` : null,
     `saved: ${new Date(b.savedAt).toISOString().slice(0, 10)}`,
     b.postedAt ? `posted: ${new Date(b.postedAt).toISOString().slice(0, 10)}` : null,
     `tags: [${tags.map(yamlStr).join(', ')}]`,
     '---',
   ].filter(Boolean);
   const body = [`# ${b.title || b.url}`, '', `<${b.url}>`, ''];
-  if (b.image) body.push(`![](${b.image})`, '');
+  if (image) body.push(`![](${image})`, '');
   if (b.note) body.push('> [!note] My note', ...b.note.split('\n').map((l) => `> ${l}`), '');
   if (b.text) body.push(b.text, '');
   return fm.join('\n') + '\n\n' + body.join('\n');
 }
 
+const IMAGE_EXT = { 'image/webp': 'webp', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif' };
+
 export async function exportMarkdownZip() {
-  const [bookmarks, collections] = await Promise.all([db.allBookmarks(), db.allCollections()]);
-  const names = new Map(collections.map((c) => [c.id, c.name]));
+  const [bookmarks, collections, thumbs] = await Promise.all([db.allBookmarks(), db.allCollections(), db.allThumbs()]);
+  const thumbById = new Map(thumbs.map((t) => [t.id, t]));
   const used = new Set();
   const files = [];
   for (const b of bookmarks) {
-    const folder = names.get(b.collectionId) ? slug(names.get(b.collectionId), 60) : 'Inbox';
+    const names = db.collectionsOf(b, collections).map((c) => c.name);
+    const folder = names[0] ? slug(names[0], 60) : 'Inbox';
     let path = `Stash/${folder}/${slug(b.title || b.url)}.md`;
     for (let i = 2; used.has(path.toLowerCase()); i++) path = `Stash/${folder}/${slug(b.title || b.url)} ${i}.md`;
     used.add(path.toLowerCase());
-    files.push({ path, data: new TextEncoder().encode(toMarkdown(b, names.get(b.collectionId))) });
+    // Local thumbnails go in the zip; Instagram's own image links stop working after a few days.
+    let image = b.image;
+    const t = thumbById.get(b.id);
+    if (t) {
+      const file = `${b.id.replace(/[^A-Za-z0-9_-]+/g, '-')}.${IMAGE_EXT[t.type] || 'img'}`;
+      files.push({ path: `Stash/attachments/${file}`, data: new Uint8Array(await t.blob.arrayBuffer()) });
+      image = `../attachments/${file}`;
+    }
+    files.push({ path, data: new TextEncoder().encode(toMarkdown(b, names, image)) });
   }
   return zip(files);
 }
@@ -157,11 +202,11 @@ export const LIST_FORMATS = {
   txt: 'Plain list of links (.txt)',
 };
 
-const SOURCE_NAMES = { x: 'X', reddit: 'Reddit', linkedin: 'LinkedIn', web: 'Web' };
+const SOURCE_NAMES = { x: 'X', reddit: 'Reddit', linkedin: 'LinkedIn', instagram: 'Instagram', web: 'Web' };
 
-// X and LinkedIn posts have generic titles ("Jane on X"); the post text says more.
+// X, LinkedIn and Instagram posts have generic titles ("Jane on X"); the post text says more.
 export function displayTitle(b) {
-  if ((b.source === 'x' || b.source === 'linkedin') && b.text) {
+  if ((b.source === 'x' || b.source === 'linkedin' || b.source === 'instagram') && b.text) {
     const first = b.text.split('\n').find((l) => l.trim()) || '';
     return first.length > 110 ? first.slice(0, 107).trimEnd() + '…' : first;
   }
@@ -169,7 +214,6 @@ export function displayTitle(b) {
 }
 
 function rows(list, collections) {
-  const names = new Map((collections || []).map((c) => [c.id, c.name]));
   const day = (t) => (t ? new Date(t).toISOString().slice(0, 10) : '');
   return list.map((b) => ({
     title: displayTitle(b),
@@ -179,7 +223,10 @@ function rows(list, collections) {
     saved: day(b.savedAt),
     posted: day(b.postedAt),
     tags: [...new Set([...(b.tags || []), ...(b.autoTags || [])])],
-    collection: names.get(b.collectionId) || '',
+    collection: db
+      .collectionsOf(b, collections || [])
+      .map((c) => c.name)
+      .join(', '),
     note: b.note || '',
     text: b.text || '',
   }));
