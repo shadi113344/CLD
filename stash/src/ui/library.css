@@ -119,7 +119,7 @@ button:disabled { opacity: .5; cursor: default; }
 .card .meta .kind.unsaved { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
 .card .meta .pick { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .card.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.pickbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -4px 0 12px; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); font-size: 13px; }
+.pickbar { position: sticky; top: 0; z-index: 5; max-width: 860px; box-sizing: border-box; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -4px 0 12px; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); font-size: 13px; }
 .pickbar .grow { flex: 1; }
 .pickbar .check { display: flex; gap: 6px; align-items: center; }
 .pickbar button[disabled] { opacity: .5; cursor: default; }
