@@ -56,12 +56,14 @@ const extRequests = async () => (await admin('/log')).log.filter((l) => l.src ==
 
 const logLines = [];
 let finishedCount = 0;
+let unsaveFinishedCount = 0;
 function watch(page) {
   page.on('console', (m) => {
     const t = m.text();
     if (!/\[Stash/.test(t)) return;
     logLines.push(`${new Date().toISOString().slice(11, 23)} ${t}`);
     if (/Instagram sync finished/.test(t)) finishedCount++;
+    if (/unsaving finished/.test(t)) unsaveFinishedCount++;
   });
 }
 
@@ -136,6 +138,15 @@ async function waitFinished(before, timeout = 150000) {
     await sleep(300);
   }
   await sleep(800); // let the card render
+}
+
+async function waitUnsaved(before, timeout = 180000) {
+  const t0 = Date.now();
+  while (unsaveFinishedCount <= before) {
+    if (Date.now() - t0 > timeout) throw new Error('unsaving never finished');
+    await sleep(300);
+  }
+  await sleep(800);
 }
 
 async function waitFor(fn, timeout = 60000, what = 'condition') {
@@ -714,11 +725,182 @@ async function profileD() {
   await t.ctx.close();
 }
 
+async function profileE() {
+  console.log('\nE. Unsaving on Instagram: chosen posts, a whole view, pushback, continuing, learning the request');
+  await admin('/reset');
+  await admin('/trim', { keep: 24 });
+  const t = await launch('E');
+  const dialogs = [];
+  t.lib.on('dialog', (dlg) => {
+    dialogs.push(dlg.message());
+    dlg.accept();
+  });
+  let before = finishedCount;
+  await t.ig.goto('https://www.instagram.com/testuser/saved/all-posts/');
+  await waitFinished(before);
+  const fakeState = await admin('/state');
+  const libView = async (hash) => {
+    await t.lib.goto(`chrome-extension://${t.id}/src/ui/library.html${hash}`);
+    await t.lib.reload();
+    await t.lib.waitForSelector('.card');
+  };
+  const pickBar = () => t.lib.textContent('.pickbar strong');
+  const unsaveReqs = async () => (await extRequests()).filter((r) => /\/unsave\/$/.test(r.path) || r.doc === 'usePolarisUnsaveMediaMutation');
+
+  console.log('\nE1. Choose two posts and unsave them; they stay in Stash');
+  await libView('#s/instagram');
+  await t.lib.click('[data-act="ig-pick"]');
+  const two = [fakeState.posts[3], fakeState.posts[7]];
+  for (const p of two) await t.lib.click(`.card[data-id="instagram:${p.code}"] .pick`);
+  check((await pickBar()) === '2 selected', 'ticking two posts selects two', await pickBar());
+  await t.lib.screenshot({ path: path.join(OUT, 'library-unsave-picking.png') });
+  await admin('/clear-log');
+  let ub = unsaveFinishedCount;
+  await t.lib.click('[data-act="unsave-picked"]');
+  await waitUnsaved(ub);
+  check(/Unsave 2 posts on Instagram\?/.test(dialogs.at(-1)) && /stay in Stash/.test(dialogs.at(-1)), 'asks first, and says they stay in Stash', dialogs.at(-1));
+  let c = await card(t.ig);
+  check(/Unsaved 2 posts on Instagram/.test(c?.title || ''), 'card: unsaved 2 posts', c);
+  let st = await admin('/state');
+  check(two.every((p) => st.unsaved.includes(p.code)) && st.posts.length === 22, 'both are unsaved on Instagram', st.unsaved);
+  let d = await dump(t.lib);
+  check(two.every((p) => d.bms.find((b) => b.id === 'instagram:' + p.code)?.igUnsaved > 0) && d.bms.length === 24, 'and still in Stash, marked unsaved');
+  let reqs = await unsaveReqs();
+  check(reqs.length === 2 && reqs.every((r, i) => r.status === 200 && r.path === `/api/v1/web/save/${two[i].pk}/unsave/`), 'one POST /api/v1/web/save/<id>/unsave/ per post, with Instagram’s id for it', reqs.map((r) => r.path + ' ' + r.status));
+  check(gaps(reqs)[0] >= 4900, `unsaves are spaced out (${gaps(reqs)[0]} ms)`);
+  check(!d.st.igUnsaveQueue, 'nothing left in the queue');
+  await libView('#s/instagram');
+  const badges = await t.lib.$$eval('.card .kind.unsaved', (els) => els.length);
+  check(badges === 2, 'cards show “Unsaved on Instagram”', badges);
+  await t.lib.click('[data-act="ig-pick"]');
+  check(!(await t.lib.$(`.card[data-id="instagram:${two[0].code}"] .pick`)) && /Select all 22/.test(await t.lib.textContent('.pickbar')), 'unsaved posts can’t be picked again');
+  await t.lib.click('[data-act="pick-cancel"]');
+
+  console.log('\nE2. Unsave a whole collection, removing the posts from Stash too');
+  const recipes = d.cols.find((x) => x.name === 'Recipes 🍕');
+  const recipeCodes = fakeState.posts.filter((p) => p.n % 5 === 0).map((p) => p.code);
+  await libView('#c/' + recipes.id);
+  await t.lib.click('[data-act="ig-pick"]');
+  await t.lib.click('[data-act="pick-all"]');
+  await t.lib.check('#pickRemove');
+  check((await pickBar()) === `${recipeCodes.length} selected`, `“Select all” picks the ${recipeCodes.length} posts in this view`, await pickBar());
+  await admin('/clear-log');
+  ub = unsaveFinishedCount;
+  await t.lib.click('[data-act="unsave-picked"]');
+  await waitUnsaved(ub);
+  check(new RegExp(`Unsave ${recipeCodes.length} posts`).test(dialogs.at(-1)) && /removed from Stash/.test(dialogs.at(-1)), 'the question says they’ll be removed from Stash', dialogs.at(-1));
+  st = await admin('/state');
+  check(recipeCodes.every((code) => st.unsaved.includes(code)) && st.collections.find((x) => x.name === 'Recipes 🍕').posts.length === 0, 'all of Recipes is unsaved on Instagram');
+  d = await dump(t.lib);
+  check(recipeCodes.every((code) => !d.bms.some((b) => b.id === 'instagram:' + code)) && d.bms.length === 24 - recipeCodes.length, 'and removed from Stash', d.bms.length);
+  check(recipeCodes.every((code) => !d.thumbs.some((x) => x.id === 'instagram:' + code)), 'with their thumbnails');
+  reqs = await unsaveReqs();
+  check(Math.min(...gaps(reqs)) >= 4900, `still spaced out (shortest gap ${Math.min(...gaps(reqs))} ms)`);
+
+  console.log('\nE3. Instagram limits activity mid-way: Stash stops at once and keeps the rest');
+  await admin('/scenario', { unsaveBlockAfter: 9 }); // 7 done so far: 2 more work, then a block
+  const four = [fakeState.posts[1], fakeState.posts[2], fakeState.posts[4], fakeState.posts[6]];
+  await libView('#s/instagram');
+  await t.lib.click('[data-act="ig-pick"]');
+  for (const p of four) await t.lib.click(`.card[data-id="instagram:${p.code}"] .pick`);
+  await admin('/clear-log');
+  ub = unsaveFinishedCount;
+  await t.lib.click('[data-act="unsave-picked"]');
+  await waitUnsaved(ub);
+  c = await card(t.ig);
+  check(/Unsaving paused/.test(c?.title || '') && /limited activity/.test(c?.detail || '') && /2 left/.test(c?.detail || ''), 'card: paused because Instagram limited activity; 2 left', c);
+  reqs = await unsaveReqs();
+  check(reqs.length === 3 && reqs[2].status === 400, 'no request after the block', reqs.map((r) => r.status));
+  d = await dump(t.lib);
+  check((d.st.igCooldownUntil - Date.now()) / 3600000 > 23.9 && d.st.igUnsaveQueue?.items.length === 2, 'Instagram left alone for 24 hours; the 2 left are kept', [d.st.igCooldownUntil, d.st.igUnsaveQueue?.items.length]);
+  await libView('#s/instagram');
+  check(/Unsaving on Instagram: 2 left/.test(await t.lib.textContent('.toolbar')), 'Stash’s library shows the job waiting');
+
+  console.log('\nE4. Continuing later, with a daily limit');
+  await admin('/scenario', { unsaveBlockAfter: null });
+  await t.lib.evaluate(async () => {
+    await chrome.storage.local.remove('igCooldownUntil');
+    const { saveSettings } = await import('/src/lib/settings.js');
+    await saveSettings({ igUnsavePerDay: 10 }); // 9 done in the last 24 hours, so 1 more today
+  });
+  await admin('/clear-log');
+  await t.ig.reload();
+  c = await waitFor(async () => {
+    const x = await card(t.ig);
+    return /waiting to be unsaved/.test(x?.title || '') ? x : null;
+  }, 15000, 'reminder card');
+  check(/2 Instagram posts waiting to be unsaved/.test(c.title) && c.buttons.includes('Continue'), 'reopening Instagram offers to continue', c);
+  await sleep(5000);
+  check(!(await extRequests()).some((r) => r.path.startsWith('/api/')), 'and doesn’t start a sync meanwhile');
+  ub = unsaveFinishedCount;
+  await clickCardButton(t.ig, 'Continue');
+  await waitUnsaved(ub);
+  c = await card(t.ig);
+  check(/Daily unsave limit reached/.test(c?.title || '') && /1 left/.test(c?.detail || ''), 'stops at the daily limit from Settings', c);
+  await t.lib.evaluate(async () => {
+    const { saveSettings } = await import('/src/lib/settings.js');
+    await saveSettings({ igUnsavePerDay: 500 });
+  });
+  await libView('#s/instagram');
+  ub = unsaveFinishedCount;
+  await t.lib.click('[data-act="unsave-resume"]');
+  await waitUnsaved(ub);
+  st = await admin('/state');
+  d = await dump(t.lib);
+  check(four.every((p) => st.unsaved.includes(p.code)) && four.every((p) => d.bms.find((b) => b.id === 'instagram:' + p.code)?.igUnsaved) && !d.st.igUnsaveQueue, '“Continue” in Stash finishes the job');
+
+  console.log('\nE5. Instagram moved its unsave request: Stash learns it from one post you unsave by hand');
+  await admin('/scenario', { unsaveRest: false });
+  const two2 = [fakeState.posts[8], fakeState.posts[9]];
+  await libView('#s/instagram');
+  await t.lib.click('[data-act="ig-pick"]');
+  for (const p of two2) await t.lib.click(`.card[data-id="instagram:${p.code}"] .pick`);
+  await admin('/clear-log');
+  ub = unsaveFinishedCount;
+  await t.lib.click('[data-act="unsave-picked"]');
+  await waitUnsaved(ub);
+  c = await card(t.ig);
+  d = await dump(t.lib);
+  check(/didn’t accept Stash’s unsave request/.test(c?.title || '') && c.buttons.includes('Open a post') && !d.st.igCooldownUntil && d.st.igUnsaveQueue?.items.length === 2, 'card asks you to unsave one post by hand (no pause, nothing lost)', c);
+  await clickCardButton(t.ig, 'Open a post');
+  await t.ig.waitForURL(`**/p/${two2[0].code}/`);
+  await t.ig.waitForSelector('#save-toggle');
+  await t.ig.click('#save-toggle');
+  c = await waitFor(async () => {
+    const x = await card(t.ig);
+    return /learnt how Instagram unsaves/.test(x?.title || '') ? x : null;
+  }, 15000, 'learnt card');
+  check(c.buttons.includes('Continue unsaving'), 'after you unsave one, Stash offers to continue', c);
+  d = await dump(t.lib);
+  const uq = d.st.igUnsaveQuery;
+  check(uq?.kind === 'graphql' && uq.friendly === 'usePolarisUnsaveMediaMutation' && uq.idPath.join('.') === 'media_id' && !/NAcM|AVqFak3/.test(JSON.stringify(uq)), 'learnt the request (no tokens kept)', uq);
+  ub = unsaveFinishedCount;
+  await clickCardButton(t.ig, 'Continue unsaving');
+  await waitUnsaved(ub);
+  st = await admin('/state');
+  reqs = (await extRequests()).filter((r) => r.doc === 'usePolarisUnsaveMediaMutation');
+  check(two2.every((p) => st.unsaved.includes(p.code)) && reqs.length === 2 && reqs.every((r) => r.status === 200 && !r.bad), 'both unsaved through the learnt request, with the page’s tokens', reqs.map((r) => [r.status, r.bad]));
+  check(/Unsaved 2 posts/.test((await card(t.ig))?.title || ''), 'card: unsaved 2 posts');
+
+  console.log('\nE6. Saving a post again on Instagram clears the mark');
+  await admin('/resave', { code: two[0].code });
+  await t.lib.evaluate(async (id) => {
+    const db = await import('/src/lib/db.js');
+    await db.patchBookmark(id, { igUnsaved: Date.now() - 3600000 }); // unsaved an hour ago
+  }, 'instagram:' + two[0].code);
+  before = finishedCount;
+  await t.lib.evaluate(() => chrome.runtime.sendMessage({ type: 'instagramSync', full: false }));
+  await waitFinished(before);
+  d = await dump(t.lib);
+  check(!d.bms.find((b) => b.id === 'instagram:' + two[0].code)?.igUnsaved && d.bms.find((b) => b.id === 'instagram:' + two[1].code)?.igUnsaved, 'a post you saved again is no longer marked unsaved; the others still are');
+  await t.ctx.close();
+}
+
 // ---------- run ----------
 
 const srv = await fake.start();
 try {
-  for (const [name, fn] of [['A', profileA], ['B', profileB], ['C', profileC], ['D', profileD]]) {
+  for (const [name, fn] of [['A', profileA], ['B', profileB], ['C', profileC], ['D', profileD], ['E', profileE]]) {
     if (only && !only.has(name)) continue;
     try {
       await fn();

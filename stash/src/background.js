@@ -220,19 +220,24 @@ async function saveThumb(b) {
 
 async function instagramSync({ full }) {
   const { igUsername } = await chrome.storage.local.get('igUsername');
+  // Saved is the natural place to watch progress; without a username, any page works.
+  const url = igUsername ? `https://www.instagram.com/${igUsername}/saved/all-posts/` : 'https://www.instagram.com/';
+  return tellInstagram({ type: 'ig-sync', full: Boolean(full) }, url);
+}
+
+// Bring an Instagram tab forward (or open url) and hand its content script a message.
+async function tellInstagram(msg, url) {
   let [tab] = await chrome.tabs.query({ url: ['https://www.instagram.com/*'] });
   if (tab) {
     await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
   } else {
-    // Saved is the natural place to watch progress; without a username, any page works.
-    const url = igUsername ? `https://www.instagram.com/${igUsername}/saved/all-posts/` : 'https://www.instagram.com/';
     tab = await chrome.tabs.create({ url, active: true });
     await waitForLoad(tab.id);
   }
   for (let i = 0; i < 20; i++) {
     try {
-      const r = await chrome.tabs.sendMessage(tab.id, { type: 'ig-sync', full: Boolean(full) });
+      const r = await chrome.tabs.sendMessage(tab.id, msg);
       if (r) return r;
     } catch {
       // A tab opened before Stash was installed or updated has no content script yet: reload it once.
@@ -366,6 +371,39 @@ const handlers = {
     const map = await db.mirrorIgCollections(list);
     broadcast({ type: 'changed' });
     return map;
+  },
+  // Queue posts to unsave on Instagram (added to any job already waiting), then start it in an Instagram tab.
+  async igUnsave({ ids, remove }) {
+    const { igUnsaveQueue: cur } = await chrome.storage.local.get('igUnsaveQueue');
+    const q = cur?.items?.length ? cur : { items: [], total: 0, done: 0, skipped: 0, startedAt: Date.now() };
+    const queued = new Set(q.items.map((x) => x.id));
+    let added = 0;
+    for (const id of ids || []) {
+      const b = await db.getBookmark(id);
+      if (!b || b.source !== 'instagram' || b.igUnsaved || queued.has(id)) continue;
+      q.items.push({ id, code: id.slice('instagram:'.length), pk: b.igPk || '', owner: b.igOwner || '', remove: Boolean(remove) });
+      queued.add(id);
+      added++;
+    }
+    if (!added) return { added: 0 };
+    q.total += added;
+    await chrome.storage.local.set({ igUnsaveQueue: q, igUnsaveNeedsTeach: false });
+    const r = await tellInstagram({ type: 'ig-unsave' }, 'https://www.instagram.com/');
+    return { added, left: q.items.length, ...r };
+  },
+  async igUnsaveResume({ force }) {
+    return tellInstagram({ type: 'ig-unsave', force: Boolean(force) }, 'https://www.instagram.com/');
+  },
+  async igUnsaveCancel() {
+    await chrome.storage.local.remove(['igUnsaveQueue', 'igUnsaveNeedsTeach']);
+    return { cancelled: true };
+  },
+  // One post unsaved on Instagram: keep it in Stash, marked, or remove it.
+  async igUnsaved({ id, remove }) {
+    if (remove) await db.deleteBookmark(id);
+    else await db.patchBookmark(id, { igUnsaved: Date.now() });
+    broadcast({ type: 'changed' });
+    return { ok: true };
   },
   // Mirrored collections with a real Instagram id, for when Instagram's list request fails.
   async igKnownCollections() {

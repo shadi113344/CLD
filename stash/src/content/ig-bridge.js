@@ -10,6 +10,10 @@
 // learnt it (from the page, the first time you open a collection), else the
 // old /api/v1 address. When neither works the card asks you to open one
 // collection once; Stash then learns the request and syncs them.
+//
+// It also unsaves posts on Instagram when you ask in Stash's library: one at
+// a time, a few seconds apart, from a queue kept in chrome.storage.local so a
+// job survives a reload, and stopping at the first sign Instagram is unhappy.
 (() => {
   const P = () => window.__stashProgress;
   const log = (...a) => console.info('[Stash]', ...a);
@@ -65,6 +69,7 @@
     const d = e.data;
     if (d?.__stash === 'ig-fetch-result') return waiting.get(d.id)?.(d.result);
     if (d?.__stash === 'ig-template') return learnTemplate(d.template).catch((err) => log('could not keep the collection request:', err.message));
+    if (d?.__stash === 'ig-unsave-template') return learnUnsave(d.template).catch((err) => log('could not keep the unsave request:', err.message));
     if (d?.__stash === 'ig-seen') return trigger(`Instagram loaded ${d.kind === 'collections' ? 'your collections' : d.kind === 'collection' ? 'a collection' : 'saved posts'}`);
     if (d?.__stash === 'ig-collections' && d.passive) return mirror(d.list).catch((err) => log('could not mirror collections:', err.message));
     if (d?.__stash !== 'ig-items' || !d.passive) return;
@@ -432,6 +437,254 @@
     });
   }
 
+  // ---- unsaving (the queue comes from Stash's library) ----
+
+  const DAY = 24 * 3600 * 1000;
+  const UNSAVE_PACE = [5000, 9000]; // ms between unsaves: slower than reading, since these change your account
+  const UNSAVE_BREAK_EVERY = 50;
+  const UNSAVE_BREAK = [120000, 240000];
+  const unsaver = { active: false, stop: false, perDay: 500 };
+  let unsaveLearnt = null; // the unsave request learnt on this page load
+  const leftOf = (q) => q?.items?.length || 0;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const getQueue = async () => (await chrome.storage.local.get('igUnsaveQueue')).igUnsaveQueue || null;
+
+  // Instagram's own unsave request, seen when you unsaved a post by hand.
+  async function learnUnsave(t) {
+    if (!t || typeof t !== 'object' || !['rest', 'graphql'].includes(t.kind)) return;
+    unsaveLearnt = { ...t, stale: false };
+    const { igUnsaveQueue: q, igUnsaveNeedsTeach } = await chrome.storage.local.get(['igUnsaveQueue', 'igUnsaveNeedsTeach']);
+    await chrome.storage.local.set({ igUnsaveQuery: unsaveLearnt, igUnsaveNeedsTeach: false });
+    log('learnt how Instagram unsaves a post', `(${t.kind === 'graphql' ? t.friendly || 'GraphQL' : t.path})`);
+    if (leftOf(q) && !unsaver.active && igUnsaveNeedsTeach) {
+      ui({
+        title: 'Stash learnt how Instagram unsaves',
+        detail: `${plural(leftOf(q), 'post')} ${leftOf(q) === 1 ? 'is' : 'are'} waiting to be unsaved.`,
+        value: 0,
+        actions: [
+          { label: 'Continue unsaving', primary: true, onClick: () => runUnsave('learnt the request') },
+          { label: 'Later', onClick: () => P().hide() },
+        ],
+      });
+    }
+  }
+
+  function unsaveCard(q, label) {
+    ui({
+      title: `Unsaving ${plural(q.total, 'Instagram post')}`,
+      detail: `${q.done} unsaved${q.skipped ? ` · ${q.skipped} skipped` : ''} · ${leftOf(q)} left · ${label}`,
+      value: q.total ? (q.total - leftOf(q)) / q.total : null,
+      actions: [{ label: 'Stop', onClick: () => (unsaver.stop = true) }],
+    });
+  }
+
+  // Wait between unsaves in short steps, so Stop is instant; a longer break every so often.
+  async function unsavePace(q, n) {
+    const long = n % UNSAVE_BREAK_EVERY === 0;
+    const [a, b] = long ? UNSAVE_BREAK : UNSAVE_PACE;
+    const until = Date.now() + a + Math.random() * (b - a);
+    if (long) unsaveCard(q, `a ${Math.round((until - Date.now()) / 60000)}-minute break, to go easy on Instagram…`);
+    while (!unsaver.stop && Date.now() < until) await sleep(200);
+  }
+
+  // Start (or continue) the queue. Returns at once; the work goes on in this tab.
+  async function runUnsave(why, { force = false } = {}) {
+    if (unsaver.active) return { running: true };
+    const st = await chrome.storage.local.get(['igUnsaveQueue', 'igUnsaveQuery', 'igUnsaveLog', 'igCooldownUntil', 'settings']);
+    const q = st.igUnsaveQueue;
+    if (!leftOf(q)) return { empty: true };
+    if (!force && st.igCooldownUntil > Date.now()) {
+      ui({
+        title: 'Unsaving is paused',
+        detail: `Instagram pushed back recently, so Stash is waiting until ${time(st.igCooldownUntil)}. ${plural(leftOf(q), 'post')} waiting.`,
+        value: 0,
+        actions: [
+          { label: 'Continue anyway', onClick: () => runUnsave('continue anyway', { force: true }) },
+          { label: 'OK', primary: true, onClick: () => P().hide() },
+        ],
+      });
+      return { cooldownUntil: st.igCooldownUntil };
+    }
+    if (run.active) {
+      log('stopping the sync to unsave');
+      stop();
+    }
+    unsaver.active = true;
+    unsaver.stop = false;
+    unsaver.perDay = Math.max(1, Math.min(5000, Number(st.settings?.igUnsavePerDay) || 500));
+    const template = unsaveLearnt || (st.igUnsaveQuery && !st.igUnsaveQuery.stale ? st.igUnsaveQuery : null);
+    log(`unsaving started (${why}): ${leftOf(q)} left, at most ${unsaver.perDay} a day`);
+    unsaveLoop(template, (st.igUnsaveLog || []).filter((t) => t > Date.now() - DAY)).catch((e) => {
+      unsaver.active = false;
+      log('unsaving failed:', e?.message || e);
+    });
+    return { started: true };
+  }
+
+  async function unsaveLoop(template, recent) {
+    let sent = 0;
+    let retried = false;
+    let failures = 0;
+    let okThisRun = 0;
+    const doubtful = []; // posts Instagram called gone before any unsave worked
+    let outcome = null;
+    let q = await getQueue();
+    while (leftOf(q) && !unsaver.stop) {
+      if (recent.length >= unsaver.perDay) {
+        outcome = { limit: true, until: recent[0] + DAY };
+        break;
+      }
+      if (sent) await unsavePace(q, sent);
+      q = await getQueue(); // re-read: Stash may have added posts, or you cancelled
+      if (!leftOf(q) || unsaver.stop) break;
+      const item = q.items[0];
+      unsaveCard(q, 'unsaving…');
+      const r = await ask({ __stash: 'ig-unsave', item: { pk: item.pk, code: item.code, owner: item.owner }, template });
+      sent++;
+      if (r.pushback) {
+        outcome = r;
+        break;
+      }
+      if (r.stale || r.gone) {
+        if (template) {
+          log(`the learnt unsave request stopped working (${r.error}); trying Instagram’s usual one`);
+          template = null;
+          unsaveLearnt = null;
+          const { igUnsaveQuery: t } = await chrome.storage.local.get('igUnsaveQuery');
+          if (t) await chrome.storage.local.set({ igUnsaveQuery: { ...t, stale: true } });
+          continue;
+        }
+        outcome = { teach: true, error: r.error };
+        break;
+      }
+      if (r.error && r.retry && !retried) {
+        retried = true;
+        unsaveCard(q, 'Instagram hiccuped, trying once more in 10s…');
+        await sleep(10000);
+        continue;
+      }
+      retried = false;
+      q = await getQueue();
+      if (!q) break;
+      q.items = q.items.filter((x) => x.id !== item.id);
+      if (r.ok) {
+        q.done++;
+        q.worked = true;
+        okThisRun++;
+        failures = 0;
+        recent.push(Date.now());
+        await send({ type: 'igUnsaved', id: item.id, remove: Boolean(item.remove) });
+      } else if (r.mediaGone && !okThisRun && !q.worked && !template) {
+        // Three "no such post" answers before anything worked is more likely the
+        // address than three deleted posts.
+        doubtful.push(item);
+        q.skipped++;
+        if (doubtful.length >= 3) {
+          q.items.unshift(...doubtful);
+          q.skipped -= doubtful.length;
+          outcome = { teach: true, error: r.error };
+        }
+      } else if (r.mediaGone || r.skip) {
+        q.skipped++;
+        log(`skipped ${item.code}: ${r.error}`);
+      } else {
+        q.skipped++;
+        failures++;
+        log(`couldn’t unsave ${item.code}: ${r.error}`);
+        if (failures >= 3) outcome = { error: r.error };
+      }
+      await chrome.storage.local.set({ igUnsaveQueue: q, igUnsaveLog: recent });
+      if (outcome) break;
+    }
+    unsaver.active = false;
+    const cancelled = !(await getQueue());
+    finishUnsave(q, outcome || (cancelled ? { cancelled: true } : unsaver.stop ? { stopped: true } : { done: true }));
+  }
+
+  async function cancelUnsave() {
+    await chrome.storage.local.remove(['igUnsaveQueue', 'igUnsaveNeedsTeach']);
+    if (unsaver.active) unsaver.stop = true;
+    else ui({ title: 'Unsaving cancelled', detail: 'The rest stay saved on Instagram.', value: 0, actions: [{ label: 'OK', primary: true, onClick: () => P().hide() }] });
+  }
+
+  async function finishUnsave(q, o) {
+    const left = o.cancelled ? 0 : leftOf(q);
+    if (!o.cancelled && !left) await chrome.storage.local.remove(['igUnsaveQueue', 'igUnsaveNeedsTeach']);
+    const counts = `${q?.done || 0} unsaved${q?.skipped ? ` · ${q.skipped} skipped` : ''}${left ? ` · ${left} left` : ''}`;
+    log('unsaving finished:', JSON.stringify(o), '—', counts);
+    const close = { label: 'Close', primary: true, onClick: () => P().hide() };
+    const cancel = { label: 'Cancel the rest', onClick: cancelUnsave };
+    if (o.pushback) {
+      const wait = COOLDOWN[o.pushback];
+      const until = wait ? Date.now() + wait : 0;
+      if (until) await chrome.storage.local.set({ igCooldownUntil: until, igLastPushback: { kind: o.pushback, message: o.message, at: Date.now() } });
+      const next = until ? ` Stash stopped to protect your account and won’t contact Instagram until ${time(until)}${wait > 12 * 3600 * 1000 ? ' tomorrow' : ''}.` : ' Log in to Instagram, then continue from Stash.';
+      return ui({ title: 'Unsaving paused', detail: `${o.message}${next} ${counts}.`, value: 0, actions: [cancel, close] });
+    }
+    if (o.limit) {
+      return ui({
+        title: 'Daily unsave limit reached',
+        detail: `Stash unsaved ${unsaver.perDay} posts in the last 24 hours, the limit set in Settings. ${counts}. Open Instagram after ${time(o.until)} to continue.`,
+        value: 0,
+        actions: [cancel, close],
+      });
+    }
+    if (o.teach) {
+      await chrome.storage.local.set({ igUnsaveNeedsTeach: true });
+      const first = q.items[0];
+      return ui({
+        title: 'Instagram didn’t accept Stash’s unsave request',
+        detail: `Unsave one post on Instagram yourself (open it and tap the bookmark icon). Stash will see how Instagram does it now and offer to continue. ${counts}.`,
+        value: 0,
+        actions: [...(first ? [{ label: 'Open a post', primary: true, onClick: () => location.assign(`/p/${first.code}/`) }] : []), cancel, { label: 'Close', onClick: () => P().hide() }],
+      });
+    }
+    if (o.error) {
+      return ui({ title: 'Unsaving stopped', detail: `${o.error} · ${counts}`, value: 0, actions: [{ label: 'Try again', onClick: () => runUnsave('try again') }, cancel, close] });
+    }
+    if (o.cancelled) return ui({ title: 'Unsaving cancelled', detail: `${counts}. The rest stay saved on Instagram.`, value: 0, actions: [close] });
+    if (o.stopped) {
+      return ui({ title: 'Unsaving stopped', detail: `${counts}.`, value: 0, actions: [{ label: 'Continue', primary: true, onClick: () => runUnsave('continue') }, cancel, { label: 'Close', onClick: () => P().hide() }] });
+    }
+    ui({
+      title: `Unsaved ${plural(q.done, 'post')} on Instagram`,
+      detail: `${counts}. Posts you kept are still in Stash, marked “Unsaved on Instagram”.`,
+      value: 1,
+      actions: [{ label: 'Open in Stash', onClick: openStash }, { label: 'Done', primary: true, onClick: () => P().hide() }],
+    });
+  }
+
+  // A job left over from before (stopped, paused, or the tab was closed): offer to continue.
+  let reminded = false;
+  async function remindUnsave() {
+    if (reminded || unsaver.active) return false;
+    const { igUnsaveQueue: q, igUnsaveNeedsTeach } = await chrome.storage.local.get(['igUnsaveQueue', 'igUnsaveNeedsTeach']);
+    if (!leftOf(q)) return false;
+    reminded = true;
+    if (igUnsaveNeedsTeach) {
+      return ui({
+        title: 'Unsave one post by hand',
+        detail: `Tap the bookmark icon on a post you want unsaved. Stash will see how Instagram does it now, then offer to continue with the ${leftOf(q)} left.`,
+        value: 0,
+        actions: [
+          { label: 'Cancel the rest', onClick: cancelUnsave },
+          { label: 'Later', onClick: () => P().hide() },
+        ],
+      });
+    }
+    ui({
+      title: `${plural(leftOf(q), 'Instagram post')} waiting to be unsaved`,
+      detail: `${q.done} unsaved so far. Stash unsaves one every few seconds in this tab, and stops if Instagram pushes back.`,
+      value: q.total ? (q.total - leftOf(q)) / q.total : 0,
+      actions: [
+        { label: 'Continue', primary: true, onClick: () => runUnsave('continue') },
+        { label: 'Cancel the rest', onClick: cancelUnsave },
+        { label: 'Later', onClick: () => P().hide() },
+      ],
+    });
+    return true;
+  }
+
   // ---- when to sync ----
 
   async function state() {
@@ -461,8 +714,12 @@
   let skippedFor = null; // page where an automatic sync was skipped because the last one was recent
   async function trigger(why) {
     rememberUser();
-    if (run.active || triggeredFor === location.pathname) return;
+    if (run.active || unsaver.active || triggeredFor === location.pathname) return;
     triggeredFor = location.pathname;
+    if (leftOf(await getQueue())) {
+      log('auto-sync skipped: an unsave job is waiting');
+      return remindUnsave();
+    }
     const { s, mode, last, cooldown, pending } = await state();
     if (s.captureInstagram === false) return log('Instagram capture is off in settings');
     if (cooldown > Date.now()) return offerAfterCooldown(cooldown, mode);
@@ -490,11 +747,16 @@
 
   // "Sync Instagram now" in Stash.
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+    if (msg?.type === 'ig-unsave') {
+      runUnsave('asked from Stash', { force: Boolean(msg.force) }).then(sendResponse, (e) => sendResponse({ error: String(e?.message || e) }));
+      return true;
+    }
     if (msg?.type !== 'ig-sync') return;
     (async () => {
       const { s, mode, cooldown } = await state();
       if (s.captureInstagram === false) return { off: true };
       if (run.active) return { running: true };
+      if (unsaver.active) return { unsaving: true };
       const m = msg.full ? 'all' : mode;
       if (cooldown > Date.now()) {
         offerAfterCooldown(cooldown, m);
@@ -508,6 +770,7 @@
   });
 
   log('Instagram capture loaded on', location.pathname);
+  setTimeout(() => remindUnsave().catch(() => {}), 3000);
   let lastPath = location.pathname;
   setInterval(() => {
     if (location.pathname !== lastPath) {

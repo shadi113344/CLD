@@ -116,6 +116,14 @@ button:disabled { opacity: .5; cursor: default; }
 .src.instagram { background: #c13584; color: #fff; }
 .card .meta .kind { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
 .card .meta .metrics { font-variant-numeric: tabular-nums; }
+.card .meta .kind.unsaved { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.card .meta .pick { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.card.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.pickbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -4px 0 12px; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); font-size: 13px; }
+.pickbar .grow { flex: 1; }
+.pickbar .check { display: flex; gap: 6px; align-items: center; }
+.pickbar button[disabled] { opacity: .5; cursor: default; }
+.toolbar .ig-queue { color: var(--text); }
 .extra img.big { max-width: min(100%, 420px); border-radius: 8px; }
 nav a .ig { font-size: 9px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; margin-left: 4px; vertical-align: 1px; }
 .card h3 { margin: 2px 0; font-size: 15px; line-height: 1.35; grid-column: 1; }

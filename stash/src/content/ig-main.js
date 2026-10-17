@@ -9,6 +9,10 @@
 // instead of /api/v1/feed/collection/<id>/posts/. That request can't be written
 // by hand (its doc_id changes), so it's learnt from the page's own request the
 // first time you open a collection, and replayed with the page's current tokens.
+//
+// Unsaving: on request, it unsaves one post the way Instagram's web app does
+// (POST /api/v1/web/save/<id>/unsave/). If Instagram has moved that, the
+// request is learnt the same way, from the first post you unsave by hand.
 (() => {
   if (window.__stashIgHooked) return;
   window.__stashIgHooked = true;
@@ -39,6 +43,7 @@
     if (m) return { kind: 'collection', igId: m[1], feed: p, cursor };
     if (/^\/api\/v1\/collections\/list\//.test(p)) return { kind: 'collections', cursor };
     if (/^\/(api\/)?graphql/.test(p)) return { kind: 'graphql' };
+    if (/\/\d{5,25}(_\d+)?\/unsave\/?$/.test(p)) return { kind: 'unsave' };
     if (/^\/api\/v1\//.test(p)) return { kind: 'api' };
     return null;
   }
@@ -127,6 +132,11 @@
     };
     const metrics = metricsOf(m);
     if (metrics) item.metrics = metrics;
+    // Instagram's ids for the post and its author, for unsaving it later.
+    const pk = [m.pk, String(m.id ?? '').split('_')[0]].map((x) => String(x ?? '')).find((x) => /^\d{5,25}$/.test(x));
+    if (pk) item.igPk = pk;
+    const owner = String(user.pk ?? user.id ?? '');
+    if (/^\d{1,25}$/.test(owner)) item.igOwner = owner;
     // The full list of your collections this post is in, when Instagram includes it.
     if (Array.isArray(m.saved_collection_ids)) item.igCollections = m.saved_collection_ids.map(String);
     return item;
@@ -392,14 +402,65 @@
     post('ig-collections', { list: fresh, passive: true, partial: true });
   }
 
+  // ---- learning the unsave request, from a post you unsave by hand ----
+
+  const unsaveSent = new Set();
+  function offerUnsaveTemplate(tpl) {
+    const sig = JSON.stringify(tpl, (k, v) => (k === 'at' ? undefined : v));
+    if (unsaveSent.has(sig)) return;
+    unsaveSent.add(sig);
+    log(`learnt how Instagram unsaves a post (${tpl.kind === 'graphql' ? tpl.friendly || 'doc ' + tpl.docId : tpl.path})`);
+    post('ig-unsave-template', { template: tpl });
+  }
+
+  function learnUnsaveRest(url, json) {
+    if (json?.status !== 'ok') return;
+    let p = '';
+    try {
+      p = new URL(url, location.origin).pathname;
+    } catch {}
+    const m = p.match(/^(\/[\w./-]*?\/)\d{5,25}(?:_\d+)?(\/[\w./-]*)$/);
+    if (m) offerUnsaveTemplate({ kind: 'rest', path: m[1] + '{pk}' + m[2], at: Date.now() });
+  }
+
+  function learnUnsaveGql(url, headers, params, json) {
+    if (!json || json.errors || json.status === 'fail') return;
+    let vars = null;
+    try {
+      vars = JSON.parse(params.get('variables') || 'null');
+    } catch {}
+    if (!vars || typeof vars !== 'object') return;
+    const idPath = findPath(vars, (k, v) => (typeof v === 'string' || typeof v === 'number') && /^\d{10,25}(_\d{1,25})?$/.test(String(v)));
+    let path = '';
+    try {
+      path = new URL(url, location.origin).pathname.replace(/\/$/, '');
+    } catch {}
+    const docId = params.get('doc_id') || '';
+    if (!idPath || !GQL_PATHS.includes(path) || !/^\d{5,30}$/.test(docId)) return log('saw Instagram unsave a post but couldn’t learn the request');
+    const lower = lowerKeys(headers);
+    offerUnsaveTemplate({
+      kind: 'graphql',
+      path,
+      docId,
+      friendly: params.get('fb_api_req_friendly_name') || lower['x-fb-friendly-name'] || '',
+      rootField: lower['x-root-field-name'] || '',
+      variables: vars,
+      idPath,
+      idFormat: String(getAt(vars, idPath)).includes('_') ? 'pk_owner' : 'pk',
+      at: Date.now(),
+    });
+  }
+
   // req: { headers, body } of the request, for GraphQL.
   function onResponse(info, url, json, req) {
     if (!info || info.kind === 'api' || !json) return;
+    if (info.kind === 'unsave') return learnUnsaveRest(url, json);
     if (info.kind !== 'collections') gatherCollections(json);
     let via = '';
     if (info.kind === 'graphql') {
       const params = formParams(req?.body);
       rememberGql(params, req?.headers);
+      if (params && /unsave/i.test(params.get('fb_api_req_friendly_name') || lowerKeys(req?.headers)['x-fb-friendly-name'] || '')) return learnUnsaveGql(url, req?.headers, params, json);
       if (collectionPart(json)) {
         const { igId, cursor, tpl } = readCollectionRequest(url, req?.headers, params);
         info = { ...info, igId, cursor };
@@ -493,6 +554,8 @@
   // Anything that means "Instagram doesn't want this right now". The bridge stops on these.
   // opts.collection: this is the collection step, where a 404 or a web page
   // means the address is gone, not that you're logged out.
+  // opts.write: an unsave, where a 404 about the post means the post is gone,
+  // and "not saved" means it's already done.
   function verdict(status, json, text, opts = {}) {
     const errs = Array.isArray(json?.errors) ? json.errors : [];
     const msg = [json?.message, json?.errorSummary, json?.errorDescription, ...errs.map((e) => [e?.message, e?.summary, e?.description].filter(Boolean).join(' '))]
@@ -507,12 +570,14 @@
     if (status === 0 || status >= 500) return { error: status ? `Instagram returned ${status}` : 'network error', retry: true };
     if (!json) {
       if (/<html|<!doctype/i.test(text || '')) {
-        if (opts.collection) return { gone: true, error: 'Instagram sent a web page instead of data' };
+        if (opts.collection || opts.write) return { gone: true, error: 'Instagram sent a web page instead of data' };
         return { pushback: 'login', message: 'Instagram sent a web page instead of data. You may be logged out.' };
       }
       return { error: 'unreadable response' };
     }
-    if (status === 404 && opts.collection) return { gone: true, error: 'Instagram no longer answers this address (404)' };
+    if (status === 404 && opts.write && /media|post|deleted|unavailable/.test(msg)) return { mediaGone: true, error: 'the post no longer exists' };
+    if (status === 404 && (opts.collection || opts.write)) return { gone: true, error: 'Instagram no longer answers this address (404)' };
+    if (opts.write && /not saved|isn.?t saved|already/.test(msg)) return null;
     if (status >= 400 || json.status === 'fail') return { error: json.message || `Instagram returned ${status}`, ...(opts.graphql ? { stale: true } : {}) };
     if (errs.length || json.error || json.errorSummary) return { error: errs[0]?.message || json.errorSummary || 'Instagram returned an error', stale: true };
     return null;
@@ -565,33 +630,30 @@
     return t;
   }
 
-  function validTemplate(t) {
-    return (
+  // A learnt GraphQL request. A collection page also needs to know where its cursor goes.
+  function validTemplate(t, { paged = true } = {}) {
+    return Boolean(
       t &&
-      GQL_PATHS.includes(t.path) &&
-      /^\d{5,30}$/.test(t.docId || '') &&
-      /^[A-Za-z0-9_]{0,120}$/.test(t.friendly || '') &&
-      /^[A-Za-z0-9_]{1,120}$/.test(t.rootField || '') &&
-      t.variables &&
-      typeof t.variables === 'object' &&
-      JSON.stringify(t.variables).length < 8000 &&
-      Array.isArray(t.idPath) &&
-      t.idPath.length &&
-      Array.isArray(t.cursorPath) &&
-      t.cursorPath.length
+        GQL_PATHS.includes(t.path) &&
+        /^\d{5,30}$/.test(t.docId || '') &&
+        /^[A-Za-z0-9_]{0,120}$/.test(t.friendly || '') &&
+        /^[A-Za-z0-9_]{0,120}$/.test(t.rootField || '') &&
+        (!paged || t.rootField) &&
+        t.variables &&
+        typeof t.variables === 'object' &&
+        JSON.stringify(t.variables).length < 8000 &&
+        Array.isArray(t.idPath) &&
+        t.idPath.length &&
+        (!paged || (Array.isArray(t.cursorPath) && t.cursorPath.length)),
     );
   }
 
   let reqNo = 0;
-  // One page of a collection, through the learnt GraphQL request.
-  async function gqlRequest(t, igId, cursor) {
-    if (!validTemplate(t) || !/^\d{5,30}$/.test(String(igId))) return { error: 'no usable collection request', stale: true };
+  // Send a learnt GraphQL request with these variables, the way the app would.
+  // Returns { res, text }, or { error, stale } when the page has no session tokens.
+  async function postGql(t, variables) {
     const tok = pageTokens();
     if (!tok.fb_dtsg || !tok.lsd || !tok.csrftoken) return { error: 'couldn’t find Instagram’s session tokens on this page', stale: true };
-    const variables = JSON.parse(JSON.stringify(t.variables));
-    setAt(variables, t.idPath, typeof getAt(variables, t.idPath) === 'number' ? Number(igId) : String(igId));
-    setAt(variables, t.cursorPath, cursor || null);
-
     let body;
     let headers;
     if (lastGql) {
@@ -635,16 +697,27 @@
     headers['x-csrftoken'] = tok.csrftoken;
     headers['x-fb-lsd'] = tok.lsd;
     if (t.friendly) headers['x-fb-friendly-name'] = t.friendly;
-    headers['x-root-field-name'] = t.rootField;
+    if (t.rootField) headers['x-root-field-name'] = t.rootField;
     if (!Object.keys(headers).includes('x-ig-app-id')) headers['x-ig-app-id'] = hints.appId || WEB_APP_ID;
     if (!Object.keys(headers).includes('x-asbd-id')) headers['x-asbd-id'] = hints.asbd || ASBD_ID;
-
     let res;
     let text = '';
     try {
       res = await origFetch(t.path, { method: 'POST', headers, body: body.toString(), credentials: 'include' });
       text = await res.text();
     } catch {}
+    return { res, text };
+  }
+
+  // One page of a collection, through the learnt GraphQL request.
+  async function gqlRequest(t, igId, cursor) {
+    if (!validTemplate(t) || !/^\d{5,30}$/.test(String(igId))) return { error: 'no usable collection request', stale: true };
+    const variables = JSON.parse(JSON.stringify(t.variables));
+    setAt(variables, t.idPath, typeof getAt(variables, t.idPath) === 'number' ? Number(igId) : String(igId));
+    setAt(variables, t.cursorPath, cursor || null);
+    const sent = await postGql(t, variables);
+    if (sent.error) return sent;
+    const { res, text } = sent;
     const json = parseText(text);
     const status = res?.status ?? 0;
     const bad = verdict(status, json, text, { collection: true, graphql: true });
@@ -653,6 +726,43 @@
     const r = collectionPart(json) && parse({ kind: 'graphql', igId: String(igId), cursor: cursor || null }, json);
     if (!r) return { status, error: 'unexpected response', stale: true };
     return { ok: true, status, ...r };
+  }
+
+  const SHORTCODE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  // A post's media id from its link: the shortcode is the id written in base 64.
+  function codeToPk(code) {
+    if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{6,}$/.test(code)) return '';
+    let n = 0n;
+    for (const c of code.slice(0, 11)) n = n * 64n + BigInt(SHORTCODE.indexOf(c));
+    return n > 0n ? n.toString() : '';
+  }
+
+  // Unsave one post: through a learnt request if there is one, else the web app's usual address.
+  async function unsaveRequest(item, t) {
+    const pk = /^\d{5,25}$/.test(String(item?.pk || '')) ? String(item.pk) : codeToPk(item?.code);
+    if (!pk) return { error: 'couldn’t work out this post’s id', skip: true };
+    let res;
+    let text = '';
+    if (t?.kind === 'graphql') {
+      if (!validTemplate(t, { paged: false })) return { error: 'no usable unsave request', stale: true };
+      const value = t.idFormat === 'pk_owner' ? (/^\d{1,25}$/.test(String(item.owner || '')) ? `${pk}_${item.owner}` : '') : pk;
+      if (!value) return { error: 'this post has no author id', skip: true };
+      const variables = JSON.parse(JSON.stringify(t.variables));
+      setAt(variables, t.idPath, typeof getAt(variables, t.idPath) === 'number' ? Number(value) : value);
+      const sent = await postGql(t, variables);
+      if (sent.error) return sent;
+      ({ res, text } = sent);
+    } else {
+      const path = t?.kind === 'rest' && /^\/[\w./-]*\{pk\}[\w./-]*$/.test(t.path || '') ? t.path.replace('{pk}', pk) : `/api/v1/web/save/${pk}/unsave/`;
+      try {
+        res = await origFetch(path, { method: 'POST', headers: { ...requestHeaders(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: '', credentials: 'include' });
+        text = await res.text();
+      } catch {}
+    }
+    const status = res?.status ?? 0;
+    const bad = verdict(status, parseText(text), text, { write: true, graphql: t?.kind === 'graphql' });
+    if (bad) return { status, ...bad };
+    return { ok: true, status };
   }
 
   const describe = (r) => `${r.status}${r.items ? `, ${r.items.length} posts` : ''}${r.pushback ? ` (${r.pushback})` : ''}${r.error ? ` (${r.error})` : ''}`;
@@ -666,6 +776,11 @@
     } else if (d?.__stash === 'ig-gql') {
       const r = await gqlRequest(d.template, d.igId, d.cursor);
       log(`POST ${d.template?.path || 'graphql'} (${d.template?.friendly || 'collection'}, collection ${d.igId}) → ${describe(r)}`);
+      post('ig-fetch-result', { id: d.id, result: r });
+    } else if (d?.__stash === 'ig-unsave') {
+      const r = await unsaveRequest(d.item, d.template);
+      const how = d.template?.kind === 'graphql' ? d.template.friendly || 'GraphQL' : d.template?.kind === 'rest' ? d.template.path : 'web/save';
+      log(`unsave ${d.item?.code} (${how}) → ${r.ok ? 'done' : describe(r)}`);
       post('ig-fetch-result', { id: d.id, result: r });
     }
   });

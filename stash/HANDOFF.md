@@ -1,4 +1,4 @@
-# Stash: handoff notes (milestone v1.7.0)
+# Stash: handoff notes (milestone v1.8.0)
 
 Give this file to a new chat to continue. The code lives in the GitHub repo `shadi113344/CLD`, under the `stash/` folder, on branch `claude/zealous-shannon-vzvr8m`. The repo root is an ideas space: never build there. The full history from v1.0 is preserved.
 
@@ -14,7 +14,8 @@ Stash is a local-first Chrome bookmark manager (Manifest V3, plain JavaScript, n
 | Reddit saved posts and comments (JSON API, auto-sync every 6 hours) | Done |
 | LinkedIn saved posts (read from the page) | Done (selectors may need updating) |
 | Instagram saved posts: live sync, collections mirrored, local thumbnails, import of Instagram's export | Done in v1.6.0 |
-| **Instagram collections over GraphQL (learnt from the page), sort by views / likes / comments, exact Reel dates** | **Done in v1.7.0; all end-to-end checks pass against a fake Instagram that now behaves like the September 2026 one; needs confirming on real Instagram** |
+| Instagram collections over GraphQL (learnt from the page), sort by views / likes / comments, exact Reel dates | Done in v1.7.0 |
+| **Unsave on Instagram: chosen posts, a whole view, or everything; posts stay in Stash** | **Done in v1.8.0 (fake-tested); the unsave request needs confirming on real Instagram** |
 | Library, side panel, command palette, keyboard shortcuts, collections, tags, notes | Done |
 | On-device AI (MiniLM through transformers.js in an offscreen document); optional API key for Anthropic or OpenAI-compatible providers | Done (the model download couldn't be tested here because Hugging Face is blocked) |
 | Ask-your-bookmarks chat, resurfacing on a schedule | Done |
@@ -52,6 +53,17 @@ Items 1–3 of `research/sort-feed/PLAN.md` are done.
 - **Counts.** Each post gets `metrics: {likes, comments, views, likesHidden?, at}` from the data the sync already downloads (`like_count`, `comment_count`, `play_count`/`view_count`). Likes are `null` when `like_and_view_counts_disabled`, because Instagram then sends a placeholder. `upsertMany` replaces metrics on each sync (never from an import). The library offers **Most viewed / Most liked / Most commented** only when the list has those counts; cards show them, the details panel shows "as of". CSV gets `views,likes,comments` columns when any row has counts; JSON rows get `views, likes, comments, countsAsOf`; Obsidian frontmatter gets them too. Sort Feed says real Saved REST answers carry no comment counts and collections do, so "Most commented" may only appear for collection posts.
 - **Dates.** A post without `taken_at` (Reels in GraphQL answers) gets `postedAt = (BigInt(pk) >> 23n) + 1314220021721` ms.
 
+## Unsave on Instagram (v1.8.0)
+
+The user asked for a bulk unsaver: selected posts, a whole view, or all saved posts.
+
+- **Library** (`library.js`): **Unsave on Instagram…** in any list with Instagram posts turns on picking (`state.picking`, `state.picked`). Checkboxes appear on posts not yet unsaved; the bar has **Select all N in this view**, **Also remove them from Stash**, and **Unsave N on Instagram**, which asks with `confirm()` first. Unsaved posts get an "Unsaved on Instagram" badge (`bookmark.igUnsaved` = when). The toolbar shows a waiting job with **Continue** / **Cancel**. Setting: `igUnsavePerDay` (default 500).
+- **Background**: `igUnsave {ids, remove}` appends to `chrome.storage.local.igUnsaveQueue` (`{items: [{id, code, pk, owner, remove}], total, done, skipped, worked}`) and sends `ig-unsave` to an Instagram tab (`tellInstagram`, shared with sync). `igUnsaved` marks or deletes each post as it's done. `igUnsaveResume`, `igUnsaveCancel`.
+- **Bridge** (`ig-bridge.js`, "unsaving" section): runs the queue one post at a time, re-reading it from storage each step (so additions and cancels from the library take effect). 5–9 s apart, a 2–4 min break every 50, daily cap from the rolling `igUnsaveLog`. Pushback stops at once and sets `igCooldownUntil` like a sync. A job left waiting shows a reminder card on the next Instagram page load, and blocks auto-sync while it waits. Syncs and unsaving never run together.
+- **Page script** (`ig-main.js`): `ig-unsave` sends `POST /api/v1/web/save/<pk>/unsave/` with the app's headers and CSRF cookie. Posts now carry `igPk` and `igOwner` from the sync; older or export-only posts get the pk from their shortcode (base 64 of the id). A 404 or web page means "address gone" → the card asks you to unsave one post by hand; `ig-main.js` learns either a REST path with the id in it or a GraphQL mutation whose friendly name contains "unsave" (`igUnsaveQuery`, never tokens), and the bridge offers to continue. A 404 that mentions the media means the post was deleted: skipped (three of those before anything worked is treated as "address gone" instead). "Not saved / already" counts as done.
+- **Kept in Stash**: unsaved posts keep their `igCollections`; `finalizeIgCollection` leaves them alone. Seeing the post in Saved again more than 10 minutes after unsaving clears `igUnsaved`.
+- **Unconfirmed on the real site**: the web unsave address. Third-party docs don't show it; the old web client used `/web/save/<id>/unsave/`, and the current app is expected to use `/api/v1/web/save/<id>/unsave/`. The teach-once path covers a change.
+
 ## Key files
 
 - `src/content/x-main.js`, `x-bridge.js`, `x-people.js`: X capture (see the code comments).
@@ -60,7 +72,7 @@ Items 1–3 of `research/sort-feed/PLAN.md` are done.
 - `src/lib/db.js`: IndexedDB. `stash` (v1: bookmarks, collections, kv), `stash-people` (v1), `stash-media` (v1: thumbs). Each separate database avoided upgrading `stash`.
 - `src/lib/export.js`: every export format; backups carry thumbnails as base64.
 - `src/ui/library.*`: library page and side panel (`panel.html` is a copy of `library.html`).
-- `dev/fake-instagram/server.mjs` and `dev/test-instagram.mjs`: the fake Instagram and the end-to-end tests (`node dev/test-instagram.mjs`, or `ONLY=D` for one profile). By default the fake behaves like the September 2026 Instagram: collections only over GraphQL, the old address a 404 page, GraphQL calls checked for `fb_dtsg`/`lsd`/`jazoest`/CSRF and the current `doc_id`. Switches: `restCollections` (old web app), `restCollectionsList`, `collectionDocId`, `collectionVia` (xhr/fetch), `gqlPrefix`, `gqlWrap`, `gqlTakenAt`. Profiles: A (fresh live sync, counts, learning), B (import first, old web app), C (GraphQL-only Saved, scrolling), D (new Instagram end to end: learn, 429, doc_id rotation, list address gone).
+- `dev/fake-instagram/server.mjs` and `dev/test-instagram.mjs`: the fake Instagram and the end-to-end tests (`node dev/test-instagram.mjs`, or `ONLY=D` for one profile). By default the fake behaves like the September 2026 Instagram: collections only over GraphQL, the old address a 404 page, GraphQL calls checked for `fb_dtsg`/`lsd`/`jazoest`/CSRF and the current `doc_id`. Switches: `restCollections` (old web app), `restCollectionsList`, `collectionDocId`, `collectionVia` (xhr/fetch), `gqlPrefix`, `gqlWrap`, `gqlTakenAt`. Profiles: A (fresh live sync, counts, learning), B (import first, old web app), C (GraphQL-only Saved, scrolling), D (new Instagram end to end: learn, 429, doc_id rotation, list address gone), E (unsaving: chosen posts, a whole collection with removal, action block, continuing, daily limit, learning the request, re-saving). More switches: `unsaveRest`, `unsaveBlockAfter`; admin `/trim`, `/resave`, `/collection`.
 
 ## Lessons learned
 
@@ -76,6 +88,7 @@ Items 1–3 of `research/sort-feed/PLAN.md` are done.
 4. Open one collection. The console should show `[Stash ig] learnt Instagram’s collection request (PolarisSavedCollectionPageWWWQuery, id at collection_id, cursor at after)`. If it says `couldn’t learn its request (no form body)`, the body capture missed how the app sends it. If nothing appears, look at what the collection page requests; the root field or query name may have changed again.
 5. Run **Sync Instagram now**. Each collection should log `(via GraphQL)`. If the card asks to open a collection again straight after learning, the replayed request was refused: the `POST /api/graphql … →` line shows Instagram's answer.
 6. Sort the Instagram view by **Most viewed**: Reels should come first with plausible numbers. If Saved posts show no comment counts, that matches Sort Feed's notes.
+7. Unsave two posts you don't need from Stash (**Unsave on Instagram…**). The console should show `[Stash ig] unsave <code> (web/save) → done` for each, and the posts should be gone from Instagram's Saved. If the card says Instagram didn't accept the request, unsave one post by hand and check for `learnt how Instagram unsaves a post`.
 
 ## Next: the rest of the Sort Feed plan
 

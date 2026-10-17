@@ -140,17 +140,23 @@ export async function upsertMany(items, stats = {}) {
       // Likes, views and comments: the latest sync's numbers replace older ones.
       const metrics = item.metrics && !fillOnly ? item.metrics : null;
       const metricsChanged = metrics && ['likes', 'comments', 'views'].some((k) => metrics[k] !== cur.metrics?.[k]);
-      if (contentChanged || ig.changed || exact || metricsChanged || (next.image !== cur.image && !cur.thumb)) stats.updated++;
-      s.put({
+      // Seen in Saved again a while after Stash unsaved it: you saved it again on Instagram.
+      const reSaved = cur.igUnsaved && !fillOnly && Date.now() - cur.igUnsaved > 10 * 60 * 1000;
+      if (contentChanged || ig.changed || exact || metricsChanged || reSaved || (next.image !== cur.image && !cur.thumb)) stats.updated++;
+      const rec = {
         ...cur,
         ...next,
         ...(item.mediaType && !(fillOnly && cur.mediaType) ? { mediaType: item.mediaType } : {}),
         ...(ig.list ? { igCollections: ig.list } : {}),
         ...(exact ? { savedAt: item.savedAt, savedAtExact: true } : {}),
         ...(metrics ? { metrics } : {}),
+        ...(item.igPk ? { igPk: item.igPk } : {}),
+        ...(item.igOwner ? { igOwner: item.igOwner } : {}),
         enriched: contentChanged ? 0 : cur.enriched,
         updatedAt: Date.now(),
-      });
+      };
+      if (reSaved) delete rec.igUnsaved;
+      s.put(rec);
     } else {
       const b = newBookmark({ ...item, igCollections: ig.list });
       s.put(b);
@@ -195,6 +201,8 @@ export function newBookmark(item) {
     ...(item.igCollections?.length ? { igCollections: item.igCollections } : {}),
     ...(item.savedAtExact ? { savedAtExact: true } : {}),
     ...(item.metrics ? { metrics: item.metrics } : {}),
+    ...(item.igPk ? { igPk: item.igPk } : {}),
+    ...(item.igOwner ? { igOwner: item.igOwner } : {}),
   };
 }
 
@@ -314,7 +322,8 @@ export async function finalizeIgCollection(igId, keepIds) {
   const s = tx.objectStore('bookmarks');
   let removed = 0;
   for (const b of await promisify(s.index('source').getAll(IDBKeyRange.only('instagram')))) {
-    if (!b.igCollections?.includes(igId) || keep.has(b.id)) continue;
+    // Posts Stash unsaved keep their collections in Stash: Instagram no longer lists them anywhere.
+    if (!b.igCollections?.includes(igId) || keep.has(b.id) || b.igUnsaved) continue;
     s.put({ ...b, igCollections: b.igCollections.filter((x) => x !== igId) });
     removed++;
   }

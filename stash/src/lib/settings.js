@@ -14,6 +14,7 @@ export const DEFAULTS = {
   captureInstagram: true,
   igAutoSync: true, // sync when Instagram loads your Saved posts (at most hourly)
   igThumbs: true, // keep small local copies of Instagram images (their links expire)
+  igUnsavePerDay: 500, // most posts Stash unsaves on Instagram in 24 hours
 
   // AI
   localAi: true, // on-device embeddings for search, grouping and auto-tags

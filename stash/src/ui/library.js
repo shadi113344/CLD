@@ -29,7 +29,15 @@ const state = {
   visible: [],
   chat: [],
   reviewQueue: null,
+  // Choosing Instagram posts to unsave.
+  picking: false,
+  picked: new Set(),
+  pickRemove: false,
+  igQueue: null, // the unsave job waiting or running in the Instagram tab
 };
+
+// An Instagram post Stash can still unsave.
+const unsavable = (b) => b.source === 'instagram' && !b.igUnsaved;
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
@@ -114,9 +122,10 @@ async function load() {
     db.allBookmarks(),
     db.allCollections(),
     db.allPeople(),
-    chrome.storage.local.get(['igLastSync', 'igCooldownUntil']),
+    chrome.storage.local.get(['igLastSync', 'igCooldownUntil', 'igUnsaveQueue']),
   ]);
   state.igState = igState;
+  state.igQueue = igState.igUnsaveQueue?.items?.length ? igState.igUnsaveQueue : null;
   state.people = people;
   state.settings = settings;
   state.bookmarks = bookmarks;
@@ -133,7 +142,7 @@ function reloadSoon() {
   reloadTimer = setTimeout(async () => {
     // Don't yank the UI while someone is typing in it.
     const a = document.activeElement;
-    if (a && a !== $('#q') && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && view.contains(a)) return reloadSoon();
+    if (a && a !== $('#q') && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== 'checkbox' && view.contains(a)) return reloadSoon();
     await load();
   }, 400);
 }
@@ -154,7 +163,7 @@ function showIndexing({ done, total, label }) {
   indexHide = setTimeout(() => (el.hidden = true), done >= total ? 2000 : 30000);
 }
 chrome.storage.onChanged.addListener((c) => {
-  if (c.settings) reloadSoon();
+  if (c.settings || c.igUnsaveQueue) reloadSoon();
 });
 
 // ---------- routing ----------
@@ -170,6 +179,8 @@ function parseRoute() {
 
 window.addEventListener('hashchange', () => {
   parseRoute();
+  state.picking = false; // choosing posts to unsave belongs to one view
+  state.picked.clear();
   renderNav();
   render();
   $('#side').classList.remove('open');
@@ -408,13 +419,34 @@ function renderList() {
             ? `<button class="ghost" data-act="rename-coll">Rename</button><button class="ghost" data-act="delete-coll">Delete collection</button>`
             : '';
 
+  const canUnsave = list.filter(unsavable);
+  const hasIg = list.some((b) => b.source === 'instagram');
+  const q = state.igQueue;
+  const queueNote =
+    q && hasIg
+      ? `<span class="ig-queue" title="Unsaving runs in your Instagram tab">Unsaving on Instagram: ${q.items.length} left</span><button class="ghost" data-act="unsave-resume">Continue</button><button class="ghost" data-act="unsave-cancel">Cancel</button>`
+      : '';
+  const unsaveBtn = canUnsave.length && !state.picking ? `<button class="ghost" data-act="ig-pick">Unsave on Instagram…</button>` : '';
+  const n = [...state.picked].filter((id) => state.byId.get(id) && unsavable(state.byId.get(id))).length;
+  const pickBar = state.picking
+    ? `<div class="pickbar" role="toolbar" aria-label="Unsave on Instagram">
+        <strong>${n} selected</strong>
+        <button class="ghost" data-act="pick-all">Select all ${canUnsave.length} in this view</button>
+        ${n ? '<button class="ghost" data-act="pick-none">Clear</button>' : ''}
+        <span class="grow"></span>
+        <label class="check"><input type="checkbox" id="pickRemove" ${state.pickRemove ? 'checked' : ''}> Also remove them from Stash</label>
+        <button class="danger" data-act="unsave-picked" ${n ? '' : 'disabled'}>Unsave ${n} on Instagram</button>
+        <button class="ghost" data-act="pick-cancel">Cancel</button>
+      </div>`
+    : '';
+
   const toolbar = `<div class="toolbar">
       <strong style="color:var(--text)">${esc(listTitle())}</strong>
       <span>${state.query ? `${list.length} match${list.length === 1 ? '' : 'es'}` : `${list.length} item${list.length === 1 ? '' : 's'}`}</span>
-      <span class="grow"></span>${syncBtn}
+      <span class="grow"></span>${queueNote}${syncBtn}${unsaveBtn}
       <select id="exportFmt" aria-label="Export this list" title="Export the links in this view"><option value="">Export ${list.length}…</option>${Object.entries(LIST_FORMATS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
       ${state.query ? '' : `<select id="sort" aria-label="Sort"><option value="saved">Newest saved</option><option value="oldest">Oldest saved</option><option value="posted">Newest posted</option>${metricSorts(baseList()).map((k) => `<option value="${k}">${METRIC_SORTS[k]}</option>`).join('')}</select>`}
-    </div>`;
+    </div>${pickBar}`;
 
   if (!list.length) {
     view.innerHTML = toolbar + emptyState();
@@ -520,9 +552,12 @@ function card(b, i) {
   const auto = (b.autoTags || [])
     .filter((t) => !(b.tags || []).includes(t))
     .map((t) => `<span class="chip auto" data-act="accept-tag" data-tag="${esc(t)}" title="Suggested — click to keep">+${esc(t)}<span class="x" data-act="rm-auto" data-tag="${esc(t)}" title="Dismiss">×</span></span>`);
-  return `<article class="card ${i === state.sel ? 'sel' : ''} ${open ? 'open' : ''}" data-id="${esc(b.id)}" data-i="${i}" tabindex="-1">
-    <div class="meta"><span class="src ${esc(b.source)}">${esc(SOURCES[b.source] || b.source)}</span>
+  const pick = state.picking && unsavable(b);
+  const picked = pick && state.picked.has(b.id);
+  return `<article class="card ${i === state.sel ? 'sel' : ''} ${open ? 'open' : ''} ${picked ? 'picked' : ''}" data-id="${esc(b.id)}" data-i="${i}" tabindex="-1">
+    <div class="meta">${pick ? `<input type="checkbox" class="pick" data-act="pick" ${picked ? 'checked' : ''} aria-label="Select to unsave on Instagram">` : ''}<span class="src ${esc(b.source)}">${esc(SOURCES[b.source] || b.source)}</span>
       ${MEDIA[b.mediaType] ? `<span class="kind">${MEDIA[b.mediaType]}</span>` : ''}
+      ${b.igUnsaved ? `<span class="kind unsaved" title="${esc(`Stash unsaved this on Instagram on ${new Date(b.igUnsaved).toLocaleString()}`)}">Unsaved on Instagram</span>` : ''}
       ${b.author ? `<span>${esc(b.author)}</span>` : `<span>${esc(host(b.url))}</span>`}
       <span title="${esc(new Date(b.savedAt).toLocaleString())}">saved ${ago(b.savedAt)}</span>
       ${metricsLine(b)}
@@ -640,6 +675,29 @@ view.addEventListener('click', async (e) => {
       return redditSync();
     case 'ig-sync':
       return instagramSync();
+    case 'ig-pick':
+      state.picking = true;
+      state.picked = new Set();
+      return render();
+    case 'pick':
+      state.picked.has(id) ? state.picked.delete(id) : state.picked.add(id);
+      return render();
+    case 'pick-all':
+      currentList().filter(unsavable).forEach((x) => state.picked.add(x.id));
+      return render();
+    case 'pick-none':
+      state.picked.clear();
+      return render();
+    case 'pick-cancel':
+      state.picking = false;
+      state.picked.clear();
+      return render();
+    case 'unsave-picked':
+      return unsavePicked();
+    case 'unsave-resume':
+      return resumeUnsave();
+    case 'unsave-cancel':
+      return cancelUnsave();
     case 'ig-import':
       e.preventDefault();
       return importInstagram();
@@ -658,6 +716,7 @@ view.addEventListener('error', (e) => e.target.tagName === 'IMG' && (e.target.hi
 
 view.addEventListener('change', async (e) => {
   const el = e.target;
+  if (el.id === 'pickRemove') return void (state.pickRemove = el.checked);
   const id = el.closest('.card')?.dataset.id;
   if (!id) return;
   if (el.dataset.act === 'set-coll') {
@@ -683,6 +742,54 @@ view.addEventListener('keydown', async (e) => {
   }
   if (e.key === 'Escape') el.blur();
 });
+
+// ---------- unsaving on Instagram ----------
+
+function duration(seconds) {
+  const m = Math.max(1, Math.round(seconds / 60));
+  return m < 90 ? `${m} minute${m === 1 ? '' : 's'}` : `${(m / 60).toFixed(1)} hours`;
+}
+
+async function unsavePicked() {
+  const ids = [...state.picked].filter((id) => state.byId.get(id) && unsavable(state.byId.get(id)));
+  if (!ids.length) return;
+  const n = ids.length;
+  const perDay = Number(state.settings.igUnsavePerDay) || 500;
+  const days = Math.ceil(n / perDay);
+  const remove = state.pickRemove;
+  const msg =
+    `Unsave ${n} post${n === 1 ? '' : 's'} on Instagram?\n\n` +
+    (remove ? 'They will also be removed from Stash.' : 'They stay in Stash, marked “Unsaved on Instagram”.') +
+    `\n\nStash unsaves one post every 5–9 seconds in your Instagram tab, with a short break every 50 (about ${duration(Math.min(n, perDay) * 7 + Math.floor(Math.min(n, perDay) / 50) * 180)}` +
+    (days > 1 ? `, spread over ${days} days because of your limit of ${perDay} a day` : '') +
+    `). Keep that tab open. Stash stops at the first sign Instagram is unhappy.\n\nTo save a post again, you’d do it on Instagram.`;
+  if (!confirm(msg)) return;
+  try {
+    const r = await send('igUnsave', { ids, remove });
+    state.picking = false;
+    state.picked.clear();
+    render();
+    if (!r?.added) return toast('Those posts are already waiting to be unsaved');
+    toast(r.cooldownUntil ? 'Queued. Instagram pushed back recently: see the card in the Instagram tab' : `Unsaving ${r.added} post${r.added === 1 ? '' : 's'}; progress is in the Instagram tab`);
+  } catch (e) {
+    toast('Couldn’t start unsaving: ' + e.message);
+  }
+}
+
+async function resumeUnsave() {
+  try {
+    const r = await send('igUnsaveResume');
+    toast(r?.cooldownUntil ? 'Instagram pushed back recently: see the card in the Instagram tab' : r?.running ? 'Already unsaving in the Instagram tab' : 'Unsaving continues in the Instagram tab');
+  } catch (e) {
+    toast('Couldn’t reach Instagram: ' + e.message);
+  }
+}
+
+async function cancelUnsave() {
+  if (!confirm(`Cancel unsaving? The ${state.igQueue?.items.length || 0} posts left stay saved on Instagram.`)) return;
+  await send('igUnsaveCancel');
+  toast('Unsaving cancelled');
+}
 
 async function deleteBookmark(id) {
   const b = state.byId.get(id);
@@ -946,6 +1053,7 @@ function renderSettings() {
       <label class="check"><input type="checkbox" name="captureInstagram"> Instagram saved posts and collections</label>
       <label class="check"><input type="checkbox" name="igAutoSync"> Sync Instagram when you open your Saved posts (at most once an hour, one request every few seconds)</label>
       <label class="check"><input type="checkbox" name="igThumbs"> Keep small copies of Instagram images in this browser (Instagram’s image links expire after a few days)</label>
+      <label>Unsave at most <input type="number" name="igUnsavePerDay" min="1" max="5000" value="${Number(s.igUnsavePerDay) || 500}"> Instagram posts a day (Stash stops for the day at this number, to protect your account)</label>
       <div class="row"><button class="ghost" type="button" data-s="reddit">Sync Reddit now</button>
       <button class="ghost" type="button" data-s="x">Open X bookmarks</button>
       <button class="ghost" type="button" data-s="li">Open LinkedIn saved</button>
@@ -1064,6 +1172,7 @@ function igStatus() {
   const bits = [];
   if (ig.igLastSync) bits.push(`Instagram last synced ${ago(ig.igLastSync)}`);
   if (ig.igCooldownUntil > Date.now()) bits.push(`paused after Instagram pushed back, until ${new Date(ig.igCooldownUntil).toLocaleString()}`);
+  if (state.igQueue) bits.push(`${state.igQueue.items.length} posts waiting to be unsaved on Instagram`);
   return bits.length ? `<p>${esc(bits.join(' · '))}.</p>` : '';
 }
 
@@ -1127,6 +1236,7 @@ function commands() {
     { label: 'Sync Reddit now', run: redditSync },
     { label: 'Sync Instagram now', run: () => instagramSync() },
     { label: 'Full Instagram rescan', run: () => instagramSync(true) },
+    ...(currentList().some(unsavable) ? [{ label: 'Unsave Instagram posts in this view…', run: () => ((state.picking = true), render()) }] : []),
     { label: 'Import Instagram export…', run: importInstagram },
     { label: 'Open X bookmarks (sync)', run: () => chrome.tabs.create({ url: 'https://x.com/i/bookmarks#stash-sync' }) },
     { label: 'Open LinkedIn saved posts (sync)', run: () => chrome.tabs.create({ url: 'https://www.linkedin.com/my-items/saved-posts/' }) },

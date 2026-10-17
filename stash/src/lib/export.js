@@ -234,6 +234,7 @@ function rows(list, collections) {
     text: b.text || '',
     // Instagram's counts as of the last sync (null: not shown, e.g. hidden likes).
     ...(b.metrics ? { views: b.metrics.views ?? null, likes: b.metrics.likes ?? null, comments: b.metrics.comments ?? null, countsAsOf: day(b.metrics.at) } : {}),
+    ...(b.igUnsaved ? { unsavedOnInstagram: day(b.igUnsaved) } : {}),
   }));
 }
 

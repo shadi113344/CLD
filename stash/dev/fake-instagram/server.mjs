@@ -32,6 +32,19 @@ const SAVED_DOC = '7208457865888221'; // the saved feed over GraphQL (scenario.r
 const LIST_DOC = '8812094671239082'; // the collections list over GraphQL (scenario.restCollectionsList false)
 export const COLLECTION_DOC = '9145367822183904';
 const COLLECTION_QUERY = 'PolarisSavedCollectionPageWWWQuery';
+const UNSAVE_DOC = '6853014297521908'; // the web app's unsave over GraphQL (scenario.unsaveRest false)
+const UNSAVE_QUERY = 'usePolarisUnsaveMediaMutation';
+// A shortcode is the media id written in base 64, as on Instagram.
+const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+export function pkToCode(pk) {
+  let n = BigInt(pk);
+  let out = '';
+  while (n > 0n) {
+    out = ALPHA[Number(n % 64n)] + out;
+    n /= 64n;
+  }
+  return out;
+}
 // The page's session tokens, as Instagram embeds them in its HTML.
 const TOKENS = { dtsg: 'NAcMx3Fak3DtsG0q:17843696212148243:1760140000', lsd: 'AVqFak3Lsd9x', eimu: '17841401234567890' };
 const jazoest = (s) => '2' + [...s].reduce((n, c) => n + c.charCodeAt(0), 0);
@@ -62,7 +75,7 @@ function makePost(n) {
   const [username, full_name] = AUTHORS[n % AUTHORS.length];
   const taken_at = 1700000000 - n * 86400;
   const pk = String(((BigInt(taken_at) * 1000n - ID_EPOCH) << 23n) | BigInt(n % 4096));
-  const code = `C${(n * 104729 + 2147483647).toString(36)}Ab_${n % 3 ? 'x' : '-'}`;
+  const code = pkToCode(pk);
   return {
     n,
     pk,
@@ -102,12 +115,16 @@ export function createState() {
       gqlPrefix: false, // start GraphQL answers with "for (;;);"
       gqlWrap: false, // edges[].node.media instead of edges[].node
       gqlTakenAt: false, // Reels in GraphQL answers come without taken_at
+      unsaveRest: true, // false: /api/v1/web/save/<id>/unsave/ is a 404 page and the app unsaves over GraphQL
+      unsaveBlockAfter: Infinity, // after this many unsaves, Instagram limits activity (feedback_required)
       rateLimitAfter: Infinity,
       checkpointAfter: Infinity,
       loggedIn: true,
       linkTtl: 3 * 86400,
     },
     apiCount: 0,
+    unsaved: [], // posts unsaved since the start, newest first
+    unsaveCount: 0,
     log: [], // { t, src, path, status }
   };
 }
@@ -310,7 +327,8 @@ const APP_JS = `
       __csr: 'gfY4n2IX9sR4O5b9T5RkjOpEGWh9t8B', __comet_req: '7', fb_dtsg: dtsg, jazoest: jazoest(dtsg), lsd, __spin_r: '1028123456', __spin_b: 'trunk', __spin_t: '1760140000',
       __crn: 'comet.igweb.PolarisSavedCollectionRoute', fb_api_caller_class: 'RelayModern', fb_api_req_friendly_name: friendly, variables: JSON.stringify(variables), server_timestamps: 'true', doc_id: docId,
     }).toString();
-    const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-ASBD-ID': '359341', 'X-CSRFToken': csrf(), 'X-FB-Friendly-Name': friendly, 'X-FB-LSD': lsd, 'X-IG-App-ID': '${APP_ID}', 'X-Root-Field-Name': rootField, 'X-BLOKS-VERSION-ID': 'f0fd53409d7667526e529854656fe20159af8b76db89f40c333e593b51a2ce10' };
+    const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-ASBD-ID': '359341', 'X-CSRFToken': csrf(), 'X-FB-Friendly-Name': friendly, 'X-FB-LSD': lsd, 'X-IG-App-ID': '${APP_ID}', 'X-BLOKS-VERSION-ID': 'f0fd53409d7667526e529854656fe20159af8b76db89f40c333e593b51a2ce10' };
+    if (rootField) headers['X-Root-Field-Name'] = rootField;
     const url = '/api/graphql?__src=app';
     let text;
     if (via === 'fetch') text = await (await fetch(url, { method: 'POST', headers, body })).text();
@@ -380,6 +398,22 @@ const APP_JS = `
       after = media.page_info.end_cursor;
       return media.page_info.has_next_page;
     });
+  } else if (route.type === 'post') {
+    // A post page with Instagram's bookmark button.
+    const btn = document.createElement('button');
+    btn.id = 'save-toggle';
+    btn.textContent = route.saved ? 'Saved ✓ (tap to unsave)' : 'Not saved';
+    btn.onclick = async () => {
+      if (route.unsaveGraphql) {
+        const j = await relay('${UNSAVE_DOC}', '${UNSAVE_QUERY}', '', { media_id: route.pk }, 'xhr');
+        if (j.errors) throw new Error('unsave failed');
+      } else {
+        const r = await fetch('/api/v1/web/save/' + route.pk + '/unsave/?__src=app', { method: 'POST', headers: { ...headers(), 'Content-Type': 'application/x-www-form-urlencoded' } });
+        if ((await r.json()).status !== 'ok') throw new Error('unsave failed');
+      }
+      btn.textContent = 'Not saved';
+    };
+    root.append(btn);
   } else if (route.type === 'saved' && route.graphqlList) {
     relay('${LIST_DOC}', 'PolarisSavedCollectionsListQuery', 'xdt_api__v1__collections__list_connection', { first: 50 }, 'fetch').then((j) => {
       const t = document.createElement('div');
@@ -424,6 +458,11 @@ const APP_JS = `
 `;
 
 function route(pathname) {
+  const pm = pathname.match(/^\/(?:p|reel)\/([A-Za-z0-9_-]+)\/?$/);
+  if (pm) {
+    const p = S.posts.find((x) => x.code === pm[1]) || S.unsaved.find((x) => x.code === pm[1]);
+    return { type: 'post', code: pm[1], pk: p?.pk || '', saved: S.posts.includes(p), unsaveGraphql: !S.scenario.unsaveRest };
+  }
   const m = pathname.match(/^\/([^/]+)\/saved\/(?:(all-posts)|([^/]+)\/(\d+))?\/?$/);
   if (!m) return { type: 'home' };
   if (m[2]) return { type: 'all-posts', graphql: !S.scenario.rest };
@@ -451,6 +490,18 @@ function pushback() {
   return null;
 }
 
+// Unsave one post: it leaves Saved and every collection.
+function unsavePost(pk) {
+  const p = S.posts.find((x) => x.pk === pk);
+  if (!p) return S.unsaved.some((x) => x.pk === pk) ? 'already' : 'missing';
+  S.posts = S.posts.filter((x) => x !== p);
+  for (const c of S.collections) c.posts = c.posts.filter((code) => code !== p.code);
+  S.unsaved.unshift(p);
+  return 'ok';
+}
+
+const ACTION_BLOCKED = { message: 'feedback_required', spam: true, feedback_title: 'Try Again Later', feedback_message: 'We restrict certain activity to protect our community. Tell us if you think we made a mistake.', status: 'fail' };
+
 function graphql(req, res, url, form) {
   const src = url.searchParams.get('__src') === 'app' ? 'app' : 'ext';
   const docId = form.get('doc_id') || '';
@@ -477,6 +528,12 @@ function graphql(req, res, url, form) {
   const pb = pushback();
   if (pb) return reply(...pb);
   if (docId === LIST_DOC) return reply(200, graphqlCollectionsList());
+  if (docId === UNSAVE_DOC) {
+    if (++S.unsaveCount > S.scenario.unsaveBlockAfter) return reply(400, ACTION_BLOCKED);
+    const done = unsavePost(String(vars.media_id || ''));
+    if (done === 'missing') return reply(200, { data: null, errors: [{ message: 'Media not found', severity: 'ERROR', code: 1675012 }], status: 'ok' });
+    return reply(200, { data: { xdt_api__v1__web__save__unsave: { status: 'ok' } }, extensions: { is_final: true } });
+  }
   if (docId !== S.scenario.collectionDocId) return reply(200, { data: null, errors: [{ message: `The query (doc_id ${docId}) is not available`, severity: 'CRITICAL', code: 1675030 }], status: 'ok' });
   const c = S.collections.find((x) => x.id === String(vars.collection_id));
   if (!c) return reply(200, { data: { fetch__MediaCollection: null }, extensions: { is_final: true } });
@@ -514,6 +571,16 @@ function api(req, res, url) {
     return reply(200, collectionsList());
   }
   if (p === '/api/v1/web/accounts/badge/') return reply(200, { status: 'ok' });
+  m = p.match(/^\/api\/v1\/web\/save\/(\d+)\/unsave\/$/);
+  if (m) {
+    if (req.method !== 'POST') return reply(405, { message: 'method not allowed', status: 'fail' });
+    if (!S.scenario.unsaveRest) return reply(404, NOT_FOUND_PAGE);
+    if (!req.headers['x-csrftoken'] || req.headers['x-csrftoken'] !== cookies(req).csrftoken) return reply(403, { message: 'CSRF token missing or incorrect', status: 'fail' });
+    if (++S.unsaveCount > S.scenario.unsaveBlockAfter) return reply(400, ACTION_BLOCKED);
+    const done = unsavePost(m[1]);
+    if (done === 'missing') return reply(404, { message: 'Media not found or unavailable', status: 'fail' });
+    return reply(200, { status: 'ok' });
+  }
   return reply(404, { message: 'not found', status: 'fail' });
 }
 
@@ -561,7 +628,7 @@ function admin(req, res) {
         return ok();
       case '/scenario':
         // JSON has no Infinity: a null limit means "no limit".
-        for (const k of ['rateLimitAfter', 'checkpointAfter']) if (k in data && data[k] == null) data[k] = Infinity;
+        for (const k of ['rateLimitAfter', 'checkpointAfter', 'unsaveBlockAfter']) if (k in data && data[k] == null) data[k] = Infinity;
         Object.assign(S.scenario, data);
         if ('apiCount' in data) S.apiCount = data.apiCount;
         return ok(S.scenario);
@@ -571,7 +638,18 @@ function admin(req, res) {
         S.log = [];
         return ok();
       case '/state':
-        return ok({ posts: S.posts.map(({ n, code, kind, username, full_name, caption }) => ({ n, code, kind, username, full_name, caption })), collections: S.collections });
+        return ok({ posts: S.posts.map(({ n, pk, code, kind, username, full_name, caption }) => ({ n, pk, code, kind, username, full_name, caption })), collections: S.collections, unsaved: S.unsaved.map((p) => p.code) });
+      case '/trim':
+        // Keep only the newest N saved posts (smaller runs for slow tests).
+        S.posts = S.posts.slice(0, data.keep);
+        for (const c of S.collections) c.posts = c.posts.filter((code) => S.posts.some((p) => p.code === code));
+        return ok();
+      case '/resave': {
+        const p = S.unsaved.find((x) => x.code === data.code);
+        S.unsaved = S.unsaved.filter((x) => x !== p);
+        S.posts.unshift(p);
+        return ok();
+      }
       case '/save': {
         // Save new posts (they go to the top of Saved), optionally into a collection.
         const added = [];

@@ -8,6 +8,7 @@ A private, local-first bookmark manager for Chrome. Built from scratch as a pers
 |---|---|
 | **Capture** | Any web page (toolbar click, `Alt+Shift+S`, or right-click for a page, link or selection) · X/Twitter bookmarks · Reddit saved posts and comments · LinkedIn saved posts · Instagram saved posts and collections (live, or from Instagram's data download) |
 | **Organise** | Tags, collections, notes, and tag suggestions you can keep or dismiss |
+| **Clean up Instagram** | Unsave chosen posts, a whole collection or view, or everything in your Instagram Saved, slowly and with a daily limit. Stash keeps the posts. |
 | **Find** | Instant keyword search plus on-device meaning-based search and a "Related" list |
 | **Ask** | "Ask your bookmarks" chat. With on-device AI only, it returns your most relevant saves. With an API key, it writes an answer with citations. |
 | **Resurface** | Spaced review: each save comes back after 3 → 7 → 21 → 60 → 180 days. Shows a badge count and an optional daily notification. |
@@ -51,6 +52,14 @@ Compared with the original extension: it doesn't send bookmarks to a vendor serv
 
 **Sort by how posts did.** The Instagram view (and any collection holding Instagram posts) can be sorted by **Most viewed**, **Most liked** or **Most commented**, alongside the date sorts. Cards show the counts, the details panel says when they were taken, and the next sync refreshes them. They come with the posts Stash already downloads, so they cost no extra requests. If a creator hides like counts, Stash doesn't show Instagram's placeholder number. CSV and JSON exports get `views`, `likes` and `comments` columns, and Obsidian notes get them in the frontmatter.
 
+**Unsave on Instagram.** Clean out your Instagram Saved without losing anything: Stash keeps the posts. In the Instagram view (or any collection, tag or search), press **Unsave on Instagram…**, tick posts or use **Select all**, and press **Unsave N on Instagram**. Stash asks first, then unsaves them from your Instagram tab:
+
+- One post every 5–9 seconds, with a 2–4 minute break every 50, and at most 500 a day (change it in Settings). Keep the Instagram tab open; the card there shows progress and has a **Stop** button.
+- The posts stay in Stash marked **Unsaved on Instagram**, with their collections, unless you tick **Also remove them from Stash**. If you save one again on Instagram, the next sync clears the mark.
+- If Instagram pushes back (limits activity, asks to slow down, wants to confirm it's you), Stash stops at once and leaves Instagram alone for 24 hours (6 after a "slow down"). The rest of the job is kept: reopen Instagram or press **Continue** in Stash later. **Cancel** drops what's left.
+- Stash uses the web app's unsave request. If Instagram has changed it, the card asks you to unsave one post by hand; Stash learns the new request from that (never your session tokens) and offers to continue.
+- Instagram may still limit accounts that unsave a lot in a short time, even at this pace. If you have thousands of saves, a lower daily limit is gentler.
+
 **Thumbnails.** Instagram's image links stop working after a few days, and its image servers won't show them on other sites. So Stash keeps a small copy of each post's image (320 px WebP, typically 10–30 KB) in this browser, and the library only ever shows those copies. Turn this off in Settings if you prefer links and captions only. Videos and reels are saved as links with their cover image; Stash never downloads videos.
 
 **Import Instagram's own export (no automation at all).** In Instagram go to Accounts Center → **Your information and permissions** → **Download your information**, pick **Saved** (JSON is best; HTML works too), and download it. In Stash, press **Import Instagram export…** (Instagram view, Settings, or the palette) and choose the downloaded `.zip`. Several parts at once are fine, and so is just `saved_posts.json` / `saved_collections.json`. Stash reads only those two files from the zip, even if it's gigabytes of media. The export has links, usernames and the exact date you saved each post, plus your collections. It has no captions or images; a live sync fills those in for posts still in your Saved, without overwriting anything.
@@ -92,4 +101,4 @@ No build step. Edit the files, then click reload on `chrome://extensions`.
 
 ## Tests
 
-`node dev/test-instagram.mjs` runs the Instagram end-to-end tests: a real Chromium with Stash loaded, pointed at a fake `www.instagram.com` (`dev/fake-instagram/server.mjs`) that mimics Instagram's Saved pages, `/api/v1` responses, the GraphQL collection request (checked for page tokens and the current `doc_id`, optionally prefixed with `for (;;);`), expiring image links and pushback. It needs Playwright with Chromium, and `python3` for building test zips.
+`node dev/test-instagram.mjs` runs the Instagram end-to-end tests: a real Chromium with Stash loaded, pointed at a fake `www.instagram.com` (`dev/fake-instagram/server.mjs`) that mimics Instagram's Saved pages, `/api/v1` responses, unsaving (and its action blocks), the GraphQL collection request (checked for page tokens and the current `doc_id`, optionally prefixed with `for (;;);`), expiring image links and pushback. It needs Playwright with Chromium, and `python3` for building test zips.
